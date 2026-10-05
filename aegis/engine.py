@@ -3,7 +3,10 @@ import hashlib
 import ipaddress
 import json
 import re
+import shlex
 from datetime import datetime, timezone
+
+RULESET_VERSION = "2026.10.1"
 
 RULES = [
     {"id": "AUTH-001", "name": "Repeated authentication failures", "severity": "medium", "technique": "T1110.001", "description": "Five failed logins from one source on one sensor within 60 seconds, across sessions."},
@@ -26,18 +29,18 @@ def normalize(raw, source):
             raise ValueError()
         when = when.astimezone(timezone.utc)
         ip = str(ipaddress.ip_address(raw["src_ip"]))
-    except ValueError:
+    except (ValueError, OverflowError):
         raise ValueError("timestamp must include a timezone and src_ip must be a valid IP") from None
     if not raw["eventid"].startswith("cowrie."):
         raise ValueError("Only Cowrie event IDs are supported")
     # Allowlist: do not retain passwords, raw login messages, keys, or unknown fields.
     data = {k: raw[k] for k in ("eventid", "session", "sensor")}
     data.update(timestamp=when.isoformat(timespec="microseconds"), src_ip=ip, source=source)
-    for key in ("username", "input", "url", "shasum"):
+    for key in ("username", "input", "url", "shasum", "realm"):
         if key in raw:
             if not isinstance(raw[key], str) or len(raw[key]) > 4096:
                 raise ValueError(f"{key} must be a string of at most 4096 characters")
-            if key == "username" or (key == "input" and raw["eventid"].startswith("cowrie.command.")) or (key in ("url", "shasum") and raw["eventid"] == "cowrie.session.file_download"):
+            if key == "username" or (key in ("input", "realm") and raw["eventid"].startswith("cowrie.command.")) or (key in ("url", "shasum") and raw["eventid"] == "cowrie.session.file_download"):
                 data[key] = raw[key]
     data["id"] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:20]
     return data
@@ -45,6 +48,29 @@ def normalize(raw, source):
 
 def session_key(event):
     return hashlib.sha256(json.dumps([event[k] for k in ("source", "sensor", "src_ip", "session")]).encode()).hexdigest()[:16]
+
+
+def is_discovery(text):
+    """Recognize simple shell command positions without interpreting or executing input."""
+    lexer = shlex.shlex(text, posix=False, punctuation_chars=";&|()\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    command_position = True
+    for token in tokens:
+        if token and all(c in ";&|()\n" for c in token):
+            command_position = True
+        elif command_position:
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+                continue
+            command_position = False
+            name = token.strip("\"'").rsplit("/", 1)[-1]
+            if name in ("uname", "hostname"):
+                return True
+    return False
 
 
 def detect(events):
@@ -62,7 +88,7 @@ def detect(events):
                 matches.append(("AUTH-001", [e["id"] for e in recent]))
         elif event["eventid"] == "cowrie.login.success" and len(history) >= 5:
             matches.append(("AUTH-002", [e["id"] for _, e in history] + [event["id"]]))
-        elif event["eventid"] == "cowrie.command.input" and re.search(r"(?:^|[;|&]\s*)\s*(?:/[^\s;|&]+/)?(?:uname|hostname)(?=\s|$|[;|&])", event.get("input", "")):
+        elif event["eventid"] == "cowrie.command.input" and not event.get("realm") and is_discovery(event.get("input", "")):
             matches.append(("DISC-001", [event["id"]]))
         elif event["eventid"] == "cowrie.session.file_download":
             matches.append(("XFER-001", [event["id"]]))
@@ -75,12 +101,19 @@ def detect(events):
             finding = incident["findings"].setdefault(rule, {**BY_ID[rule], "evidence_ids": []})
             finding["evidence_ids"] = list(dict.fromkeys(finding["evidence_ids"] + ids))
     rank = {"low": 1, "medium": 2, "high": 3}
+    by_session, by_id = {}, {e["id"]: e for e in events}
+    for event in events:
+        by_session.setdefault(session_key(event), []).append(event)
     for incident in incidents.values():
         incident["findings"] = list(incident["findings"].values())
         incident["severity"] = max((f["severity"] for f in incident["findings"]), key=rank.get)
         incident["title"] = max(incident["findings"], key=lambda f: rank[f["severity"]])["name"]
         related = {i for f in incident["findings"] for i in f["evidence_ids"]}
-        incident["events"] = sorted([e for e in events if session_key(e) == incident["id"] or e["id"] in related], key=lambda e: (e["timestamp"], e["id"]))
+        related.update(e["id"] for e in by_session[incident["id"]])
+        incident["events"] = sorted((by_id[i] for i in related), key=lambda e: (e["timestamp"], e["id"]))
+        incident["first_seen"] = incident["events"][0]["timestamp"]
+        incident["last_seen"] = incident["events"][-1]["timestamp"]
+        incident["ruleset_version"] = RULESET_VERSION
     return sorted(incidents.values(), key=lambda i: (rank[i["severity"]], i["last_seen"]), reverse=True)
 
 
@@ -94,5 +127,8 @@ def report(incident):
     for event in incident["events"]:
         detail = event.get("input", event.get("url", event.get("username", "")))
         lines.append(f"- [{event['id']}] {event['timestamp']} {event['eventid']} {json.dumps(detail)}")
+    lines += ["", f"Ruleset: {RULESET_VERSION}", "", "## Analyst activity"]
+    for item in reversed(incident.get("activity", [])):
+        lines.append(f"- {item['timestamp']} ({item['kind']}): {json.dumps(item['body'])}")
     lines += ["", "## Investigation", "Review the cited events and session context. Compare with authorized lab activity before escalating.", "", "## Limits", "Honeypot observations do not prove production compromise. Command input does not prove successful execution. A file download does not prove malware or C2. Technique mappings are candidates for analyst review. Severity is rule priority, not a calibrated probability."]
     return "\n".join(lines)

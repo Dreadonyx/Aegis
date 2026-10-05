@@ -143,3 +143,81 @@ def test_collector_partial_lines_and_oversized_records(tmp_path):
     assert not discarding
     assert rejected == 1
     assert read_log_batch(path, offset)[0] == []
+
+
+@pytest.mark.parametrize("command,expected", [
+    ('echo "example; hostname"', False), ('echo "uname -a"', False),
+    ("echo example\nhostname", True), ("echo example && /bin/uname -a", True),
+    ("hostname-looking", False), ('echo "unterminated', False),
+    ("NAME=value hostname", True), ('echo ";" hostname', False),
+])
+def test_discovery_shell_boundaries(command, expected):
+    assert bool(detect([event(eventid="cowrie.command.input", input=command)])) == expected
+
+
+def test_interactive_stdin_not_shell():
+    assert not detect([event(eventid="cowrie.command.input", input="hostname", realm="cat")])
+
+
+def test_duplicate_ingestion_at_capacity_is_allowed(tmp_path, monkeypatch):
+    import aegis.store as module
+    monkeypatch.setattr(module, "EVENT_LIMIT", 2)
+    store = module.Store(tmp_path / "capacity.sqlite3")
+    first, second, third = event(1), event(2), event(3)
+    assert store.ingest([first, second]) == 2
+    assert store.ingest([first, first, second]) == 0
+    with pytest.raises(ValueError, match="storage limit"):
+        store.ingest([first, third])
+    assert {e["id"] for e in store.events("imported")} == {first["id"], second["id"]}
+
+
+def test_notes_status_audit_and_evidence_export(client):
+    client.post("/api/replay")
+    incident_id = client.get("/api/overview").get_json()["incidents"][0]["id"]
+    path = f"/api/incidents/{incident_id}"
+    client.patch(path, json={"status": "investigating"})
+    client.patch(path, json={"status": "investigating"})
+    assert client.post(path + "/notes", json={"text": "Reviewed the demo fixture."}).status_code == 201
+    detail = client.get(path).get_json()
+    assert len(detail["activity"]) == 2
+    assert detail["activity"][0]["body"] == "Reviewed the demo fixture."
+    assert detail["activity"][1]["body"] == "open → investigating"
+    assert "Reviewed the demo fixture." in client.get(path + "/report").text
+    bundle = client.get(path + "/evidence").get_json()
+    assert bundle["schema_version"] == 1
+    assert bundle["incident"]["activity"] == detail["activity"]
+    assert {e["id"] for e in bundle["incident"]["events"]} >= set(detail["findings"][0]["evidence_ids"])
+    assert client.get(path + "?source=imported").status_code == 404
+    for bad in (None, {}, {"text": " "}, {"text": "x"*2001}, {"text": 42}):
+        response = client.post(path + "/notes", data=json.dumps(bad), content_type="application/json")
+        assert response.status_code == 400
+
+
+def test_paginated_search_has_no_missing_events(client):
+    client.post("/api/replay")
+    collected = []
+    for page in range(1, 5):
+        result = client.get(f"/api/events?limit=5&page={page}").get_json()
+        assert result["total"] == 18 and result["pages"] == 4
+        collected.extend(e["id"] for e in result["events"])
+    assert len(collected) == len(set(collected)) == 18
+    assert client.get("/api/events?q=hostname").get_json()["total"] == 1
+    for query in ("page=0", "page=x", "limit=501", "limit=-1", "q=" + "x"*201):
+        assert client.get("/api/events?"+query).status_code == 400
+
+
+def test_evaluation_does_not_mutate_dataset(client):
+    result = client.get("/api/evaluation").get_json()
+    assert result["passed"] == result["total"] == 10
+    assert client.get("/api/overview").get_json()["events"] == 0
+
+
+def test_health_checks_database(client, monkeypatch):
+    import sqlite3
+    assert client.get("/api/health").get_json()["storage"]["events"] == 0
+    def unavailable():
+        raise sqlite3.OperationalError("private path details")
+    monkeypatch.setattr(client.application.extensions["store"], "usage", unavailable)
+    response = client.get("/api/health")
+    assert response.status_code == 503
+    assert "private path" not in response.text

@@ -3,6 +3,7 @@ import ipaddress
 import json
 import os
 import secrets
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -14,7 +15,8 @@ from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
-from aegis.engine import RULES, detect, normalize, report
+from aegis.engine import RULES, RULESET_VERSION, detect, normalize, report
+from aegis.evaluate import evaluate
 from aegis.store import Store
 
 ROOT = Path(__file__).resolve().parent
@@ -56,18 +58,26 @@ def create_app(database=None):
     def invalid(error):
         return jsonify(error=str(error)), 400
 
+    @app.errorhandler(sqlite3.Error)
+    def storage_error(error):
+        app.logger.error("Storage operation failed: %s", type(error).__name__)
+        return jsonify(error="Storage is unavailable. Check database access and free disk space, then retry."), 503
+
     def source_arg():
         source = request.args.get("source", "demo")
         if source not in ("demo", "imported"):
             raise ValueError("source must be demo or imported")
         return source
 
-    def incidents(source):
+    def incidents(source, events=None):
         states = store.statuses()
-        return [{**i, "status": states.get(i["id"], "open")} for i in detect(store.events(source))]
+        return [{**i, "status": states.get(i["id"], "open")} for i in detect(events if events is not None else store.events(source))]
 
     def incident_by_id(incident_id):
-        return next((i for i in incidents(source_arg()) if i["id"] == incident_id), None)
+        incident = next((i for i in incidents(source_arg()) if i["id"] == incident_id), None)
+        if incident:
+            incident["activity"] = store.activity(incident_id)
+        return incident
 
     @app.get("/")
     def index():
@@ -76,13 +86,13 @@ def create_app(database=None):
 
     @app.get("/api/health")
     def health():
-        return jsonify(status="ok", mode="local lab")
+        return jsonify(status="ok", mode="local lab", storage=store.usage())
 
     @app.get("/api/overview")
     def overview():
         source = source_arg()
         events = store.events(source)
-        found = incidents(source)
+        found = incidents(source, events)
         timeline = {}
         for e in sorted(events, key=lambda e: e["timestamp"]):
             minute = e["timestamp"][:16]
@@ -92,14 +102,30 @@ def create_app(database=None):
             open_incidents=sum(i["status"] != "resolved" for i in found),
             timeline=[{"time": k, "count": v} for k, v in timeline.items()][-40:],
             rules=RULES, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")),
+            ruleset_version=RULESET_VERSION, storage=store.usage(),
             collector=app.config.get("COLLECTOR_STATUS", "Not configured"))
 
     @app.get("/api/events")
     def event_list():
         events = sorted(store.events(source_arg()), key=lambda e: (e["timestamp"], e["id"]), reverse=True)
         query = request.args.get("q", "").casefold()
+        if len(query) > 200:
+            raise ValueError("Search text must be at most 200 characters")
+        try:
+            page = int(request.args.get("page", "1"))
+            limit = int(request.args.get("limit", "50"))
+            if page < 1 or not 1 <= limit <= 500:
+                raise ValueError()
+        except ValueError:
+            raise ValueError("page must be positive and limit must be between 1 and 500") from None
         events = [e for e in events if query in json.dumps(e).casefold()]
-        return jsonify(total=len(events), events=events[:500], limit=500)
+        start = (page - 1) * limit
+        return jsonify(total=len(events), events=events[start:start+limit], limit=limit, page=page,
+                       pages=max(1, (len(events)+limit-1)//limit))
+
+    @app.get("/api/evaluation")
+    def evaluation():
+        return jsonify(evaluate())
 
     @app.post("/api/replay")
     def replay():
@@ -153,6 +179,25 @@ def create_app(database=None):
         store.set_status(incident_id, body["status"])
         return jsonify(status=body["status"])
 
+    @app.post("/api/incidents/<incident_id>/notes")
+    def add_note(incident_id):
+        if not incident_by_id(incident_id):
+            return jsonify(error="Incident not found"), 404
+        body = request.get_json()
+        text = body.get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+            raise ValueError("Write a note between 1 and 2,000 characters")
+        store.add_note(incident_id, text.strip())
+        return jsonify(activity=store.activity(incident_id)), 201
+
+    @app.get("/api/incidents/<incident_id>/evidence")
+    def evidence_export(incident_id):
+        incident = incident_by_id(incident_id)
+        if not incident:
+            return jsonify(error="Incident not found"), 404
+        return Response(json.dumps({"schema_version": 1, "incident": incident}, indent=2), mimetype="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}-evidence.json"'})
+
     @app.get("/api/incidents/<incident_id>/report")
     def download_report(incident_id):
         incident = incident_by_id(incident_id)
@@ -188,7 +233,7 @@ def create_app(database=None):
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
             with opener.open(req, timeout=45) as response:
                 result = json.loads(response.read(100000))
-            if not isinstance(result.get("response"), str) or not result["response"].strip():
+            if not isinstance(result, dict) or not isinstance(result.get("response"), str) or not result["response"].strip():
                 raise ValueError("Empty model response")
             return jsonify(text=result["response"], model=model, label="AI draft — verify all claims against the evidence")
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
@@ -246,7 +291,7 @@ def follow_log(app, path):
                     app.extensions["store"].ingest(batch)
                 offset, discarding = next_offset, next_discarding
                 app.config["COLLECTOR_STATUS"] = f"Watching Cowrie log; last poll skipped {rejected} unsupported records"
-            except (OSError, ValueError):
+            except (OSError, ValueError, sqlite3.Error):
                 app.config["COLLECTOR_STATUS"] = "Waiting for a readable Cowrie log or available storage"
             time.sleep(2)
     threading.Thread(target=worker, daemon=True).start()

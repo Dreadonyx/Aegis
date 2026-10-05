@@ -2,7 +2,9 @@
 
 **An evidence-first SOC and deception lab.** Import or collect Cowrie telemetry, inspect explainable detections, follow incident timelines, and export analyst reports.
 
-This is a working local v0.1, with a real Cowrie sensor and a separate synthetic demo. It is intended for learning, defensive research, and repeatable portfolio demonstrations.
+This is a working local v0.2, with a real Cowrie sensor and a separate synthetic demo. It is intended for learning, defensive research, and repeatable portfolio demonstrations.
+
+![Aegis investigation workspace](docs/screenshots/workspace.png)
 
 ## Start the complete lab
 
@@ -28,7 +30,8 @@ Stopping the stack preserves its named volumes. The dashboard database lives in 
 3. Follow an evidence link to its source event. Open **Detection rules** to see the precise trigger.
 4. Change an incident to **Investigating** or **Resolved**. The workflow persists in SQLite.
 5. Click **Export report** for a Markdown report containing rule findings and evidence IDs.
-6. Open **Lab & validation**, then **Replay & evaluate**. The fixture has three expected positive sessions and two expected negative sessions.
+6. Add an investigation note in the **Analyst notebook**. Status changes and notes are retained with the case and included in both exports.
+7. Open **Lab & validation** to inspect ten regression checks and the five-session demo evaluation. These checks can run without importing data.
 
 Replays are idempotent. Demo and imported telemetry have separate namespaces and never correlate with one another.
 
@@ -38,7 +41,8 @@ Replays are idempotent. Demo and imported telemetry have separate namespaces and
 - Local collector polling the shared Cowrie log, with restart-safe deduplication, inode/size-based rotation handling, and partial/oversized-line handling.
 - Four deterministic rules: repeated failures, login after failures, system discovery commands, and completed downloads.
 - Cross-session authentication correlation within a sensor/source/time window; incident grouping by dataset, sensor, source address, and session.
-- Incident queue, severity/search filters, searchable events, candidate ATT&CK mappings, source-event timelines, and persistent triage status.
+- Incident queue with severity, workflow, and text filters; paginated event search; full event inspection; candidate ATT&CK mappings; and source-event timelines.
+- Persistent triage status, append-only analyst notes, timestamped status history, and versioned JSON evidence export.
 - Rule-based report export and an optional local Ollama draft, clearly distinguished in the interface.
 - Responsive dashboard, keyboard focus states, escaped event content, CSRF protection, trusted-host checks, and a restrictive content security policy.
 
@@ -85,7 +89,7 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | `AEGIS_OLLAMA_MODEL` | Installed local Ollama model name | Disabled |
 | `AEGIS_OLLAMA_URL` | Loopback Ollama HTTP address | `http://127.0.0.1:11434` |
 
-For a local Cowrie installation, set `AEGIS_COWRIE_LOG` to its JSON log before starting the app. Click **Refresh** to see new events; the browser does not poll automatically.
+For a local Cowrie installation, set `AEGIS_COWRIE_LOG` to its JSON log before starting the app. Click **Refresh** to update all visible data, or enable **Auto-refresh queue** for 15-second queue and counter updates. Background refresh deliberately leaves the open evidence panel and unsaved notes alone. Notes survive in-app navigation and refreshes, but unsaved drafts are not persisted across browser reloads. A leave-page prompt protects nonempty drafts.
 
 ## Import format
 
@@ -105,18 +109,19 @@ Run the Python dashboard on the same host as an existing Ollama installation. Se
 
 Only rule descriptions and evidence IDs are sent to the model; raw attacker command text, credentials, IPs, and URLs are excluded. Requests use the local `/api/generate` endpoint, a 45-second timeout, and a single-request concurrency limit. Redirects and non-loopback endpoints are rejected. Generated text is displayed as an unverified draft and never changes findings or triggers actions.
 
-The default Docker setup has no AI model service. Its loopback address refers to the dashboard container, so use the native Python mode for this optional integration. The adapter has mocked tests; real-model output quality and latency have not been validated. There is no Astra integration in v0.1.
+The default Docker setup has no AI model service. Its loopback address refers to the dashboard container, so use the native Python mode for this optional integration. The adapter has mocked tests; real-model output quality and latency have not been validated. There is no Astra integration in this version.
 
 ## Validation
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
+python3 -m aegis.evaluate
 python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 ```
 
-The browser smoke test expects the Compose stack at port 8000. It checks the SSH banner and collector, then replay, incident selection, status persistence, export, search, rule display, fixture evaluation, import escaping, and mobile overflow. It writes screenshots to `test-results/` and adds clearly named test telemetry. Set `AEGIS_TEST_URL` to a different local dashboard URL to skip the Compose SSH check.
+The browser smoke test expects the Compose stack at port 8000. It checks the SSH banner and collector, then replay, incident selection, status and note persistence, draft preservation, event inspection, both exports, search, workflow filters, rule display, fixture evaluation, import escaping, and mobile overflow. It writes screenshots to `test-results/` and adds clearly named test telemetry. Set `AEGIS_TEST_URL` to a different local dashboard URL to skip the Compose SSH check.
 
 See [verification notes](docs/VERIFICATION.md) for completed checks and interpretation limits.
 
@@ -124,9 +129,11 @@ See [verification notes](docs/VERIFICATION.md) for completed checks and interpre
 
 This is a single-user local lab using Flask's development server. It has no user accounts, TLS, production retention system, high-throughput streaming engine, or automated incident response. The event cap is 50,000; detection is recomputed from stored events on reads. It is designed for small datasets, not sustained hostile traffic.
 
+Discovery parsing recognizes simple shell command positions and ignores quoted lookalikes and interactive stdin. It is intentionally not a full shell parser and will miss some wrappers, expansions, or obfuscation.
+
 Recorded input does not prove successful command execution. Downloads do not establish malware or C2. Discovery can be benign; rule severity is priority, not a probability. ATT&CK mappings are candidates for review. Deduplication can collapse otherwise identical records sharing a timestamp. Collector rotation supports rename/create or observed truncation; copy-truncate followed by rapid regrowth can evade a size-based reset.
 
-Next milestones: evaluate against independent labeled telemetry; improve detection coverage and performance; add authenticated multi-user deployment; validate model explanations; add a second telemetry source and cross-source incident correlation. Adaptive deception, network beaconing detection, and malware analysis are later modules.
+For the current local-lab scope, the remaining validation work is independent labeled telemetry and real local-model testing. Multi-user deployment, additional sensors, adaptive deception, and malware analysis remain optional future projects rather than requirements for this release.
 
 ## References
 
@@ -134,3 +141,27 @@ Next milestones: evaluate against independent labeled telemetry; improve detecti
 - [Cowrie Docker documentation](https://docs.cowrie.org/en/latest/docker/README.html): sensor image and configuration.
 - [MITRE ATT&CK detection strategies](https://attack.mitre.org/detectionstrategies/): defensive detection context.
 - [Ollama generate endpoint](https://docs.ollama.com/api/generate): optional local model adapter.
+
+## Practical API reference
+
+GET endpoints are available on the local dashboard. Mutations require the dashboard session cookie and its `X-Aegis-CSRF` token; use the browser for interactive changes.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/health` | Service and database readiness; returns 503 on database failure |
+| `GET /api/overview?source=demo` | Dataset counts, incident queue, ruleset version, collector and storage status |
+| `GET /api/events?source=imported&q=hostname&page=1&limit=50` | Stable timestamp/ID ordering; page size 1–500 |
+| `GET /api/incidents/<id>?source=demo` | Findings, linked events, and analyst activity |
+| `GET /api/incidents/<id>/report?source=demo` | Markdown report |
+| `GET /api/incidents/<id>/evidence?source=demo` | JSON bundle with schema and ruleset versions |
+| `GET /api/evaluation` | Non-mutating synthetic regression evaluation |
+| `POST /api/replay` | Idempotent demo ingestion |
+| `POST /api/import` | Atomic multipart JSONL import (`file`) |
+| `PATCH /api/incidents/<id>?source=demo` | Set workflow with JSON `status` |
+| `POST /api/incidents/<id>/notes?source=demo` | Append JSON `text`, 1–2,000 characters; 100 notes per case |
+
+## Portfolio presentation
+
+A concise, supportable description: “Built a local SOC lab integrating Cowrie telemetry, four explainable detection rules, evidence-linked incident investigation, analyst audit history, and repeatable synthetic regression evaluation.”
+
+Demonstrate the full path from event to finding to analyst decision. Show the limitations alongside the tests. Avoid claiming measured real-world detection accuracy or validated AI performance until those evaluations are completed.

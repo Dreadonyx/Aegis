@@ -27,6 +27,23 @@ with sync_playwright() as p:
     expect(page.locator("#notice")).to_have_text("Incident status saved.")
     page.reload()
     expect(page.locator("#incident-status")).to_have_value("investigating")
+    page.locator("#note-text").fill("Reviewed fixture evidence. This is synthetic lab activity.")
+    page.locator("#refresh").click()
+    expect(page.locator("#note-text")).to_have_value("Reviewed fixture evidence. This is synthetic lab activity.")
+    page.get_by_role("button", name="Save note").click()
+    expect(page.locator("#notice")).to_have_text("Analyst note saved.")
+    page.reload()
+    expect(page.locator("#analyst-activity")).to_contain_text("Reviewed fixture evidence.")
+    page.locator(".timeline-event .event-link").first.click()
+    expect(page.locator("#event-dialog")).to_be_visible()
+    expect(page.locator("#event-json")).to_contain_text('"eventid"')
+    page.keyboard.press("Escape")
+    expect(page.locator("#event-dialog")).not_to_be_visible()
+    page.evaluate("window.scrollTo(0, 0)")
+    page.screenshot(path="test-results/aegis-desktop.png", full_page=True)
+    with page.expect_download() as evidence_download:
+        page.get_by_role("link", name="Evidence JSON").click()
+    assert evidence_download.value.suggested_filename.endswith("-evidence.json")
     with page.expect_download() as download:
         page.get_by_role("link", name="Export report").click()
     assert "aegis-" in download.value.suggested_filename
@@ -38,6 +55,8 @@ with sync_playwright() as p:
     page.locator('[data-view="lab"]').click()
     page.locator("#validate").click()
     expect(page.locator(".evaluation-grid")).to_be_visible()
+    expect(page.locator("#check-summary")).to_have_text("10 / 10 passed")
+    expect(page.locator(".check-row")).to_have_count(10)
     expect(page.locator("#metric-events")).to_have_text("18")
     malicious_text = '<img src=x onerror="window.injected=true">'
     record = dict(timestamp="2026-10-05T15:00:00Z", eventid="cowrie.command.input", session="browser-import", sensor="local", src_ip="192.0.2.88", input="hostname; "+malicious_text)
@@ -48,9 +67,12 @@ with sync_playwright() as p:
     assert page.evaluate("window.injected") is None
     page.locator('[data-source="demo"]').click()
     expect(page.locator(".incident-item")).to_have_count(3)
+    page.locator("#workflow-filter").select_option("investigating")
+    expect(page.locator(".incident-item")).to_have_count(1)
+    page.locator("#workflow-filter").select_option("all")
     page.set_viewport_size({"width":390,"height":844})
     page.screenshot(path="test-results/aegis-mobile.png",full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Mobile page overflows"
     assert not errors, errors
     browser.close()
-print("Browser smoke passed: replay, investigation, workflow persistence, export, search, rules, validation, import escaping, mobile layout.")
+print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, 10 regression checks, import escaping, mobile layout.")
