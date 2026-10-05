@@ -1,0 +1,50 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      AEGIS_COWRIE_LOG: /cowrie-log/cowrie.json
+    volumes:
+      - aegis-data:/app/data
+      - cowrie-log:/cowrie-log:ro
+    networks: [frontend]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+  cowrie:
+    image: cowrie/cowrie@sha256:710f1e4601a663ac8591f58a42b44e4cd3b7ea170c7e6cdb9e54c430a30cd459
+    environment:
+      COWRIE_HONEYPOT_HOSTNAME: ssh-lab-01
+      COWRIE_HONEYPOT_BACKEND: shell
+      COWRIE_TELNET_ENABLED: "false"
+      COWRIE_SSH_FORWARDING: "false"
+    volumes:
+      - cowrie-log:/cowrie/cowrie-git/var/log/cowrie
+    networks: [lab]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 512m
+  ssh-relay:
+    build: .
+    command: ["python", "deploy/ssh_relay.py"]
+    ports:
+      - "127.0.0.1:2222:2222"
+    networks: [frontend, lab]
+    depends_on: [cowrie]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    read_only: true
+    pids_limit: 64
+    mem_limit: 128m
+    sysctls:
+      net.ipv4.ip_forward: "0"
+networks:
+  frontend:
+  lab:
+    internal: true
+volumes:
+  aegis-data:
+  cowrie-log:
