@@ -231,7 +231,7 @@ def create_app(database=None):
                 "prompt": json.dumps({"synthetic_demo": incident["source"] == "demo", "findings": evidence})}
             req = urllib.request.Request(endpoint.rstrip("/") + "/api/generate", json.dumps(payload).encode(), {"Content-Type": "application/json"})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-            with opener.open(req, timeout=45) as response:
+            with opener.open(req, timeout=float(os.environ.get("AEGIS_OLLAMA_TIMEOUT", "45"))) as response:
                 result = json.loads(response.read(100000))
             if not isinstance(result, dict) or not isinstance(result.get("response"), str) or not result["response"].strip():
                 raise ValueError("Empty model response")

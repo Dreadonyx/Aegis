@@ -88,6 +88,7 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | `AEGIS_COWRIE_LOG` | Local Cowrie JSONL file to follow | Disabled |
 | `AEGIS_OLLAMA_MODEL` | Installed local Ollama model name | Disabled |
 | `AEGIS_OLLAMA_URL` | Loopback Ollama HTTP address | `http://127.0.0.1:11434` |
+| `AEGIS_OLLAMA_TIMEOUT` | Ollama request timeout in seconds | `45` |
 
 For a local Cowrie installation, set `AEGIS_COWRIE_LOG` to its JSON log before starting the app. Click **Refresh** to update all visible data, or enable **Auto-refresh queue** for 15-second queue and counter updates. Background refresh deliberately leaves the open evidence panel and unsaved notes alone. Notes survive in-app navigation and refreshes, but unsaved drafts are not persisted across browser reloads. A leave-page prompt protects nonempty drafts.
 
@@ -107,7 +108,7 @@ One invalid file record rejects the entire import, with a line number. The colle
 
 Run the Python dashboard on the same host as an existing Ollama installation. Set `AEGIS_OLLAMA_MODEL` to a model already available there, then restart Aegis. The **Generate AI draft** button becomes available. Aegis does not download models automatically.
 
-Only rule descriptions and evidence IDs are sent to the model; raw attacker command text, credentials, IPs, and URLs are excluded. Requests use the local `/api/generate` endpoint, a 45-second timeout, and a single-request concurrency limit. Redirects and non-loopback endpoints are rejected. Generated text is displayed as an unverified draft and never changes findings or triggers actions.
+Only rule descriptions and evidence IDs are sent to the model; raw attacker command text, credentials, IPs, and URLs are excluded. Requests use the local `/api/generate` endpoint, a 45-second timeout by default (`AEGIS_OLLAMA_TIMEOUT`), and a single-request concurrency limit. Redirects and non-loopback endpoints are rejected. Generated text is displayed as an unverified draft and never changes findings or triggers actions.
 
 The default Docker setup has no AI model service. Its loopback address refers to the dashboard container, so use the native Python mode for this optional integration. The adapter has mocked tests; real-model output quality and latency have not been validated. There is no Astra integration in this version.
 

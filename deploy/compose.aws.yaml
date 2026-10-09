@@ -1,0 +1,38 @@
+# AWS honeypot overlay: docker compose -p aegis -f compose.yaml -f deploy/compose.aws.yaml up -d
+# Cowrie is published directly on host port 22 so it records real source
+# addresses. The host firewall (infra/aegis_stack.py) drops every new outbound
+# connection from the honeypot network and all container access to instance
+# metadata. The dashboard stays on 127.0.0.1 and is reached through SSM.
+services:
+  dashboard:
+    restart: unless-stopped
+    environment:
+      AEGIS_OLLAMA_MODEL: llama3.2:3b
+      AEGIS_OLLAMA_URL: http://127.0.0.1:11434
+      AEGIS_OLLAMA_TIMEOUT: "240"
+  cowrie:
+    restart: unless-stopped
+    ports:
+      - "22:2222"
+    networks: [honeypot]
+  # Shares the dashboard's network namespace, so its loopback address is
+  # the dashboard's loopback address.
+  ollama:
+    image: ollama/ollama:0.34.3
+    restart: unless-stopped
+    network_mode: "service:dashboard"
+    depends_on: [dashboard]
+    volumes:
+      - ollama-models:/root/.ollama
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 5g
+  ssh-relay:
+    # Not used when Cowrie is published directly.
+    profiles: [local-relay]
+networks:
+  honeypot:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+volumes:
+  ollama-models:
