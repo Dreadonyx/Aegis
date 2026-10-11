@@ -5,3 +5,10 @@ data/
 *.sqlite3*
 test-results/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.bak
+.coverage
+htmlcov/

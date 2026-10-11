@@ -1,3 +1,5 @@
 .venv/
 cdk.out/
 cdk-outputs.json
+# Contains the AWS account ID; kept locally so synth reuses the pinned AMI lookup.
+cdk.context.json
