@@ -344,3 +344,15 @@ Gate: "No automated block/remediation path exists by default" stays ✓ (none ex
 | Runbook, environment template, rollback plan, and release notes are complete | ✓ | OPERATIONS.md, .env.example, rollback rehearsal, RELEASE_NOTES.md |
 
 **Verdict:** one gate is partly open, so following the specification's release principle, Aegis 2.0 stays **2.0.0-rc1**, not production-ready. The blocker is independent labeled evaluation: label real sessions in the session view (the honeypot collects until 2026-10-28), export them, and rerun `python -m aegis.realdata` or `python -m aegis.labeled_eval`.
+
+## Fixes after the release candidate (2026-10-11)
+
+- First GitHub CI run failed on one test that matched raw evidence with SQL `LIKE` on a BLOB (behavior differs between SQLite builds); reproduced in CI's Python 3.12 image and fixed. CI is green.
+- The full compose stack was verified on 2.0 (real SSH → Cowrie → collector → live dataset, healthy non-root read-only dashboard, clean SIGTERM exit); the browser smoke test now passes in compose mode and on reruns.
+- The browser smoke test runs in CI.
+- Sign-in lockouts persist across restarts (migration 8).
+- Overview and hourly series are faster at the event cap (SQL aggregation, bounded queue); a 0 ms duration bug was fixed.
+- The optional Ollama image is pinned by digest.
+- Labeling UX: a visible saved state, no accidental re-saves or label flips; outside-labeler task export and label import.
+- Rollback rehearsed again on the real 1.0 database at schema 8.
+- docs/VERIFICATION.md and PENDING.md updated for 2.0.

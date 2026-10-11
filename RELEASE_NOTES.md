@@ -13,7 +13,7 @@ A release candidate. Every specification release gate passes except independent 
 
 ## Upgrading from 1.0
 
-Database migrations run automatically at startup (schema 1 → 7), are additive, and were rehearsed on a real 1.0 database, including a rollback to the 1.0 code. Back up first (`python -m aegis.backup create`).
+Database migrations run automatically at startup (schema 1 → 8), are additive, and were rehearsed on a real 1.0 database, including a rollback to the 1.0 code. Back up first (`python -m aegis.backup create`).
 
 Behavior changes:
 
