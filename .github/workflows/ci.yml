@@ -26,6 +26,33 @@ jobs:
       - name: Detection fixtures
         run: python -m aegis.evaluate > /dev/null
 
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install (hash-locked) and Chromium for the pinned Playwright
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+          python -m playwright install --with-deps chromium
+      - name: Start Aegis on a fresh database
+        run: |
+          AEGIS_DB="$RUNNER_TEMP/aegis.sqlite3" AEGIS_PORT=8001 python app.py > "$RUNNER_TEMP/aegis.log" 2>&1 &
+          for i in $(seq 60); do curl -sf http://127.0.0.1:8001/api/v1/health/ready > /dev/null && exit 0; sleep 1; done
+          cat "$RUNNER_TEMP/aegis.log"; exit 1
+      - name: Browser smoke (desktop and mobile)
+        # Port 8001 selects standalone mode; port 8000 means the full compose stack with the SSH relay.
+        env:
+          AEGIS_TEST_URL: http://127.0.0.1:8001
+        run: python tests/browser_smoke.py
+      - name: Server log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/aegis.log"
+
   dependencies:
     runs-on: ubuntu-24.04
     steps:
