@@ -7,7 +7,10 @@ python3 -m aegis.labeled_eval path/to/dataset                                   
 python3 -m aegis.labeled_eval path/to/dataset --format json                     # machine-readable
 python3 -m aegis.labeled_eval path/to/dataset --test-after 2026-10-20T00:00:00Z # time-separated
 python3 -m aegis.labeled_eval path/to/dataset --config settings.json            # alternative thresholds
+python3 -m aegis.labeled_eval path/to/dataset --model models/live-2026-10-20     # include an ML model
 ```
+
+With `--model`, the report adds `engine:ml` and `ML-001`, records the model version and training window, and warns about leakage when the model was trained on the same dataset or its training window ends after evaluated sessions start. Score ML only on sessions after its training window (`--test-after` at or after the training end). Enable ML in production only if that evaluation shows it adds value over rules and statistics.
 
 ## Dataset format
 

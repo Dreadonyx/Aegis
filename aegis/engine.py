@@ -6,6 +6,7 @@ from aegis.fusion import fuse
 from aegis.rules import (DEFAULT_CONFIG, RULESET_VERSION, catalog as rule_catalog, fingerprint, is_discovery,  # noqa: F401
                          rule_findings, session_key, validate_config)
 from aegis.sequences import catalog as sequence_catalog, sequence_findings
+from aegis.ml import catalog as ml_catalog
 from aegis.statistics import catalog as statistics_catalog
 
 DEFAULT = validate_config(DEFAULT_CONFIG)
@@ -13,7 +14,8 @@ DEFAULT = validate_config(DEFAULT_CONFIG)
 
 def catalog(config=DEFAULT):
     statistical = statistics_catalog(config) if config["statistical_enabled"] else []
-    return rule_catalog(config) + sequence_catalog(config) + statistical
+    ml = ml_catalog(config) if config["ml_enabled"] else []
+    return rule_catalog(config) + sequence_catalog(config) + statistical + ml
 
 
 RULES = catalog()

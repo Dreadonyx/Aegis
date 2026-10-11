@@ -33,14 +33,14 @@ DATASET_LABELS = {"demo": "synthetic replay; not observed attacks", "imported": 
                   "live": "collected from the configured Cowrie sensor"}
 
 
-def create_app(database=None, detection_config=None):
+def create_app(database=None, detection_config=None, model_dir=None):
     app = Flask(__name__)
     app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=2 * 1024 * 1024,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
                       TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
     store = Store(database or os.environ.get("AEGIS_DB", ROOT / "data/aegis.sqlite3"))
     app.extensions["store"] = store
-    analyzer = Analyzer(store, detection_config if detection_config is not None else load_config())
+    analyzer = Analyzer(store, detection_config if detection_config is not None else load_config(), model_dir)
     app.extensions["analyzer"] = analyzer
     analyzer.refresh()  # recompute stored detections when rules or settings changed
     ai_lock = threading.Lock()
@@ -158,7 +158,7 @@ def create_app(database=None, detection_config=None):
             open_incidents=sum(i["status"] in ("open", "investigating") for i in found), timeline=stats["timeline"],
             rules=analyzer.catalog, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")), ruleset_version=RULESET_VERSION,
             dataset_label=DATASET_LABELS[source], detection=store.detection_state(source), storage=store.usage(),
-            statistics=statistics_summary(source),
+            statistics=statistics_summary(source), ml=ml_summary(source),
             collector=collector_status())
 
     @app.get("/api/events")
@@ -180,6 +180,20 @@ def create_app(database=None, detection_config=None):
                     dirty=state.get("dirty"), last_error=state.get("last_error"), baselines=baselines,
                     cold_start=any(b["state"] == "insufficient_baseline" for b in baselines) or not baselines,
                     signals=store.findings(dataset, {"engine": "statistical", "status": "active"}, 1, 0)[0])
+
+    def ml_summary(dataset):
+        state = store.signal_state(dataset, "ml") or {}
+        return dict(enabled=analyzer.config["ml_enabled"], status=state.get("status", "not_run"), detail=state.get("detail"),
+                    model=state.get("model"), scored_sessions=state.get("scored_sessions", 0), computed_at=state.get("computed_at"),
+                    dirty=state.get("dirty"), last_error=state.get("last_error"),
+                    signals=store.findings(dataset, {"engine": "ml", "status": "active"}, 1, 0)[0])
+
+    @app.get("/api/v1/ml")
+    def ml_status():
+        source = source_arg()
+        analyzer.ensure_current(source)
+        return jsonify(dataset=source, **ml_summary(source),
+                       note="Isolation Forest scores show unusualness relative to the training sessions. They are not probabilities.")
 
     @app.get("/api/v1/statistics")
     def statistics_status():

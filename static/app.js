@@ -108,7 +108,7 @@ function renderActivity(timeline) {
 }
 
 function renderRules(rules) {
-  $('#rule-list').innerHTML = rules.map(r => `<article class="rule-row"><div class="rule-id">${esc(r.id)}<small>${{sequence: 'Sequence', statistical: 'Statistic'}[r.engine] || 'Rule'} v${esc(r.version)}</small></div>
+  $('#rule-list').innerHTML = rules.map(r => `<article class="rule-row"><div class="rule-id">${esc(r.id)}<small>${{sequence: 'Sequence', statistical: 'Statistic', ml: 'ML'}[r.engine] || 'Rule'} v${esc(r.version)}</small></div>
     <div><h3>${esc(r.name)}</h3><p>${esc(r.description)}</p><p class="rule-rationale">Severity: ${esc(r.severity_rationale)}</p>
     ${r.technique ? `<a class="technique" href="https://attack.mitre.org/techniques/${esc(r.technique.replace('.', '/'))}/" target="_blank" rel="noreferrer">${esc(r.technique)} ↗</a>` : ''}
     </div>${severityPill(r.severity)}</article>`).join('');
@@ -155,14 +155,16 @@ async function loadDetail(id) {
     ${incident.findings.map(f => `<article class="finding ${f.engine === 'sequence' ? 'sequence' : ''}"><strong>${esc(f.name)}</strong><p>${esc(f.description)}</p>
     ${f.rationale ? `<p class="finding-why"><span>Why</span>${esc(f.rationale.explanation)}</p>` : ''}
     <div class="finding-links">${f.technique ? `<a class="technique" href="https://attack.mitre.org/techniques/${esc(f.technique.replace('.', '/'))}/" target="_blank" rel="noreferrer">${esc(f.technique)} ↗</a>` : ''}
-    <span class="technique">${esc(f.id)} v${esc(f.rule_version)}</span><span class="technique">${{sequence: 'Sequence', statistical: 'Statistic'}[f.engine] || 'Rule'}</span>
+    <span class="technique">${esc(f.id)} v${esc(f.rule_version)}</span><span class="technique">${{sequence: 'Sequence', statistical: 'Statistic', ml: 'ML'}[f.engine] || 'Rule'}</span>
     <a class="evidence-link" href="#event-${esc(f.evidence_ids[0])}">${f.evidence_ids.length} evidence event${f.evidence_ids.length === 1 ? '' : 's'}</a></div>
     ${f.rationale ? `<details class="facts"><summary>Facts behind this finding</summary><pre>${esc(JSON.stringify(f.rationale.facts, null, 2))}</pre></details>` : ''}</article>`).join('')}
     ${(incident.signals || []).length ? `<h3 class="section-label">Related statistical signals <span>Unusual, not proof · not part of severity</span></h3>
     ${incident.signals.map(s => `<article class="finding signal"><strong>${esc(s.name)}</strong>
     <p class="finding-why"><span>Why</span>${esc(s.rationale.explanation)}</p>
-    <div class="finding-links"><span class="technique">${esc(s.id)} v${esc(s.rule_version)}</span><span class="technique">Robust z ${esc(s.score)} (unusualness, not probability)</span>
-    <span class="technique">Baseline n=${esc(s.rationale.facts.baseline.sample_size)}</span></div>
+    <div class="finding-links"><span class="technique">${esc(s.id)} ${s.engine === 'ml' ? esc(s.rule_version) : `v${esc(s.rule_version)}`}</span>
+    ${s.engine === 'ml'
+      ? `<span class="technique">Model score ${esc(s.score)} · above ${esc(s.rationale.facts.training_percentile)}% of training sessions (not a probability)</span>`
+      : `<span class="technique">Robust z ${esc(s.score)} (unusualness, not probability)</span><span class="technique">Baseline n=${esc(s.rationale.facts.baseline?.sample_size)}</span>`}</div>
     <details class="facts"><summary>Facts behind this signal</summary><pre>${esc(JSON.stringify(s.rationale.facts, null, 2))}</pre></details></article>`).join('')}` : ''}
     ${(incident.correlation || []).filter(c => c.strength === 'weak').map(c => `<p class="correlation-note"><strong>Weak link.</strong> ${esc(c.explanation)}</p>`).join('')}
     <div id="ai-output"></div><h3 class="section-label timeline-title">Evidence timeline <span>${incident.events.length} related events</span></h3>
@@ -212,6 +214,11 @@ async function loadEvaluation() {
     <span>${esc(metricNames[b.metric] || b.metric)}${b.entity.sensor ? ` · ${esc(b.entity.sensor)}` : ''}</span>
     <span>${b.state === 'established' ? 'Established' : 'Insufficient'} · ${b.sample_size} / ${b.required}${b.drift?.change_ratio ? ` · drift ×${esc(b.drift.change_ratio)}` : ''}</span></div>`).join('')
     || '<p class="muted">No observations in this dataset yet.</p>';
+  const m = await api(`/api/v1/ml?${query()}`);
+  $('#ml-status').textContent = !m.enabled ? 'Off (default) · enable only after evaluating a model'
+    : m.dirty ? `Recompute pending: ${m.last_error || 'error'}`
+    : m.status === 'ok' ? `${m.model.model_version} · ${m.scored_sessions} sessions scored · ${m.signals} signal${m.signals === 1 ? '' : 's'}`
+    : `No ML output (${m.status}): ${m.detail || ''}`;
   const chain = await api('/api/v1/evidence/verify');
   $('#chain-status').textContent = chain.valid
     ? `Verified · ${chain.records.toLocaleString()} raw records${chain.purged ? ` (${chain.purged} purged by retention)` : ''}${chain.head_hash ? ` · head ${chain.head_hash.slice(0, 12)}…` : ''}`

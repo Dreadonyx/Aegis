@@ -12,3 +12,6 @@ test-results/
 *.bak
 .coverage
 htmlcov/
+# Trained models: pickles derived from attacker telemetry. Mount them; never commit or bake them in.
+models/
+*.joblib

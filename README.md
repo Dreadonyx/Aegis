@@ -43,6 +43,7 @@ Replays are idempotent. Demo and imported telemetry have separate namespaces and
 - Separate `demo`, `imported`, and `live` datasets; versioned schema migrations; liveness, readiness, and per-source health endpoints.
 - Five versioned, configurable rules (repeated failures, login after failures, discovery commands, completed downloads, SCP/SFTP uploads) and two ordered sequences (login → discovery → transfer; failures → login → shell input). Every finding stores its exact evidence, machine-readable facts, rule version, and severity rationale. See the [detection reference](docs/DETECTION.md).
 - Statistical signals (median/MAD robust baselines, no lookahead, explicit cold-start status): sensor event-rate spikes, username breadth per source, command volume and duration per session. Signals are low severity, carry a robust z-score kept apart from severity, and never create incidents on their own.
+- Optional Isolation Forest scoring (off by default): manual, window-bounded training with a manifest; integrity-checked, fail-closed loading; scores reported as training percentiles, never probabilities. See the [ML section](docs/DETECTION.md#optional-ml-layer-c).
 - Offline evaluation harness for labeled datasets: precision, recall, F1, false-positive rate, and confusion matrices per engine, rule, detection type, and sensor, with time-separated scoring and stated limitations. See [EVALUATION.md](docs/EVALUATION.md).
 - Evidence fusion: findings sharing a session form one incident; brute-force bursts are one finding, not one case per window. Address-only links are labeled weak. Findings and incidents are persisted and updated after every commit, including late or out-of-order events.
 - Incident queue with severity, workflow, and text filters; paginated event search; full event inspection; candidate ATT&CK mappings; and source-event timelines.
@@ -91,6 +92,7 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | `AEGIS_BIND` | HTTP listen address | `127.0.0.1` |
 | `AEGIS_COWRIE_LOG` | Local Cowrie JSONL file to follow | Disabled |
 | `AEGIS_SOURCE_ID` | Provenance name for the live collector | `cowrie-live` |
+| `AEGIS_ML_MODEL_DIR` | Verified Isolation Forest model directory (used only with `"ml_enabled": true`) | Unset |
 | `AEGIS_DETECTION_CONFIG` | JSON file with detection thresholds ([reference](docs/DETECTION.md#configuration)) | Built-in defaults |
 
 Startup fails with a clear message if `AEGIS_COWRIE_LOG` points at Cowrie's diagnostic `cowrie.log`, at a directory, or into a missing directory, or if `AEGIS_SOURCE_ID` is not 1–64 lowercase letters, digits, `.`, `_`, or `-`. On SIGTERM (`docker stop`) the collector finishes its current batch before the process exits.
@@ -127,6 +129,7 @@ python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
 python3 -m aegis.evaluate
 python3 -m aegis.labeled_eval path/to/labeled-dataset   # see docs/EVALUATION.md
+python3 -m aegis.ml train --help                         # optional ML layer, see docs/DETECTION.md
 python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 ```
@@ -177,6 +180,7 @@ GET endpoints are available on the local dashboard. Mutations require the dashbo
 | `GET /api/v1/sessions/<session>/timeline?source=demo&sensor=...` | Session events in order with linked findings (up to 2,000 events) |
 | `GET /api/v1/statistics?source=live` | Statistical baseline status per metric (established or insufficient, sample sizes, drift), signal count, findings by engine and severity |
 | `GET /api/v1/statistics/series?source=live&bucket=3600&since=...&until=...` | Zero-filled per-bucket counts (events by type, distinct sources, usernames, commands, sessions, change from previous) and session duration and density summaries; at most 1,000 buckets |
+| `GET /api/v1/ml?source=live` | ML status (disabled, ok, missing, integrity, stale, incompatible, rejected, dependency), model version, sessions scored, signals |
 | `GET /api/v1/detection` | Active detection settings, fingerprint, rule and sequence catalog, recompute state |
 | `GET /api/v1/metrics` | Prometheus text: per-source totals, collector counters, lag, batch latency, evidence count |
 | `GET /api/v1/evidence/verify` | Recompute raw-evidence digests and hash chain; returns head hash to anchor elsewhere |

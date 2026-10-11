@@ -9,7 +9,9 @@ import threading
 import time
 from pathlib import Path
 
-from aegis import statistics
+import hashlib
+
+from aegis import ml, statistics
 from aegis.engine import catalog, detect, fingerprint, validate_config
 
 DATASETS = ("demo", "imported", "live")
@@ -30,8 +32,10 @@ def load_config(path=None):
 
 
 class Analyzer:
-    def __init__(self, store, config=None):
+    def __init__(self, store, config=None, model_dir=None):
         self.store = store
+        self.model_dir = model_dir if model_dir is not None else os.environ.get("AEGIS_ML_MODEL_DIR")
+        self.models = {}
         self.config = validate_config(config or {})
         self.fingerprint = fingerprint(self.config)
         self.stats_fingerprint = statistics.fingerprint(self.config)
@@ -67,6 +71,39 @@ class Analyzer:
                 log.exception("Could not mark statistics for dataset %s for recomputation", dataset)
             return None
 
+    def ml_fingerprint(self):
+        """Changes when settings, the ML release, or the model files change, so scores are recomputed."""
+        parts = [ml.ML_VERSION, json.dumps(self.config, sort_keys=True), str(self.model_dir)]
+        for name in ("model.json", "model.joblib"):
+            try:
+                stat = Path(self.model_dir, name).stat() if self.model_dir else None
+                parts.append(f"{name}:{stat.st_size}:{stat.st_mtime_ns}" if stat else f"{name}:none")
+            except OSError:
+                parts.append(f"{name}:missing")
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+    def _model(self, model_dir, max_age_days, dataset):
+        """Load once per model file version, dataset, and day (so the age limit is re-checked daily)."""
+        key = (self.ml_fingerprint(), dataset, time.strftime("%Y-%m-%d", time.gmtime()))
+        if key not in self.models:
+            self.models = {key: ml.load(model_dir, max_age_days, dataset)}
+        return self.models[key]
+
+    def machine_learning(self, dataset):
+        """Score a dataset's sessions with the configured model. A model that cannot be used yields no ML
+        findings (earlier ones are superseded) and a recorded reason; rules and statistics are unaffected."""
+        try:
+            with self.lock:
+                return self.store.replace_signals(dataset, lambda events: ml.compute(events, self.config, self.model_dir, self._model),
+                                                  self.ml_fingerprint(), engine="ml")
+        except Exception as error:
+            log.exception("ML scoring failed for dataset %s", dataset)
+            try:
+                self.store.mark_signal_dirty(dataset, f"{type(error).__name__} during ML scoring", "ml")
+            except Exception:
+                log.exception("Could not mark ML scoring for dataset %s for recomputation", dataset)
+            return None
+
     def after_commit(self, records, force_statistics=True):
         """Detection for the source addresses touched by newly committed records, then statistics
         (immediately for uploads and replays, at most every STATS_INTERVAL seconds for live batches)."""
@@ -79,6 +116,7 @@ class Analyzer:
             last = self.stats_run.get(dataset)
             if force_statistics or last is None or time.monotonic() - last >= STATS_INTERVAL:
                 self.statistics(dataset)
+                self.machine_learning(dataset)
         return results
 
     def after_live_commit(self, records):
@@ -91,9 +129,12 @@ class Analyzer:
         if not state or state["dirty"] or state["fingerprint"] != self.fingerprint:
             result = self.analyze(dataset)
         stats_state = self.store.stats_state(dataset)
-        if not stats_state or stats_state["dirty"] or stats_state["fingerprint"] != self.stats_fingerprint \
-                or stats_state["event_count"] != self.store.event_count(dataset):
+        count = self.store.event_count(dataset)
+        if not stats_state or stats_state["dirty"] or stats_state["fingerprint"] != self.stats_fingerprint or stats_state["event_count"] != count:
             self.statistics(dataset)
+        ml_state = self.store.signal_state(dataset, "ml")
+        if not ml_state or ml_state["dirty"] or ml_state["fingerprint"] != self.ml_fingerprint() or ml_state["event_count"] != count:
+            self.machine_learning(dataset)
         return result
 
     def refresh(self):

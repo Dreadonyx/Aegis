@@ -1,0 +1,9 @@
+# Optional ML layer (Phase 4). Off by default; install only where AEGIS ML scoring or training runs.
+# Fully pinned, each release public for at least two weeks when chosen (2026-10-11).
+-r requirements.txt
+scikit-learn==1.9.1
+numpy==2.5.3
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.7.0
+narwhals==2.26.0

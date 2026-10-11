@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from aegis import statistics
+from aegis import ml, statistics
 from aegis.analysis import load_config
 from aegis.canonical import normalize
 from aegis.engine import detect
@@ -69,7 +69,7 @@ def load(directory):
     return manifest, events, rejected, labels, files
 
 
-def evaluate_dataset(directory, config=None, test_after=None):
+def evaluate_dataset(directory, config=None, test_after=None, model_dir=None):
     config = config or load_config()
     manifest, events, rejected, labels, files = load(directory)
     sessions = {}
@@ -87,14 +87,18 @@ def evaluate_dataset(directory, config=None, test_after=None):
     positives = {k for k in population if by_id[k]["label"] == "malicious"}
 
     findings = [f for i in detect(events, config) for f in i["findings"]] + statistics.compute(events, config)["findings"]
+    model = None
+    if model_dir:
+        model = ml.load(model_dir, config["ml_max_model_age_days"])  # evaluation may score a synthetic model; leakage is reported below
+        findings += ml.compute(events, {**config, "ml_enabled": True}, model_dir, lambda *_: model)["findings"]
     event_session = {e["id"]: (e["sensor"], e["session"]) for e in events}
     touched = {f["finding_id"]: {event_session[i] for i in f["evidence_event_ids"]} for f in findings}
     predicted = lambda keep: set().union(*([touched[f["finding_id"]] for f in findings if keep(f)] or [set()])) & population
 
     results = {"any": metrics(predicted(lambda f: True), positives, population)}
-    for engine in ("rule", "sequence", "statistical"):
+    for engine in ("rule", "sequence", "statistical") + (("ml",) if model else ()):
         results[f"engine:{engine}"] = metrics(predicted(lambda f, engine=engine: f["engine"] == engine), positives, population)
-    for rule_id in RULE_IDS + SEQUENCE_IDS + STAT_IDS:
+    for rule_id in RULE_IDS + SEQUENCE_IDS + STAT_IDS + (("ML-001",) if model else ()):
         results[rule_id] = metrics(predicted(lambda f, rule_id=rule_id: f["rule_id"] == rule_id), positives, population)
     by_type = {}
     for kind, rules in TYPE_RULES.items():
@@ -122,10 +126,21 @@ def evaluate_dataset(directory, config=None, test_after=None):
         limitations.append(f"{rejected} event line(s) failed validation and were excluded.")
     if not by_type:
         limitations.append("No session carries detection types, so per-type coverage is unavailable.")
+    model_info = None
+    if model:
+        trained = model.manifest["training"]
+        model_info = {k: model.manifest[k] for k in ("model_version", "trained_at", "feature_version", "threshold")} | {"training": trained}
+        if trained.get("files_sha256") and trained["files_sha256"].get("events.jsonl") == files["events.jsonl"]:
+            limitations.append("The model was trained on this same dataset: ML metrics are in-sample and optimistic.")
+        elif trained.get("until") and any(ts(sessions[k][0]) < ts({"timestamp": trained["until"]}) for k in population):
+            limitations.append(f"The model's training window ends {trained['until']}, after some evaluated sessions start: possible leakage. "
+                               "Use --test-after at or after the training end.")
+        if trained.get("synthetic"):
+            limitations.append("The model was trained on synthetic data.")
     return {"dataset": {k: manifest.get(k) for k in ("name", "version", "description", "source", "license", "synthetic")}, "files_sha256": files,
             "split": {"test_after": test_after, "method": "time-separated" if test_after else "whole dataset"},
             "sessions": {"evaluated": n, "malicious": malicious, "benign": n - malicious, "unlabeled_excluded": unlabeled},
-            "events": {"accepted": len(events), "rejected": rejected}, "detectors": results, "by_type": by_type, "by_sensor": by_sensor,
+            "events": {"accepted": len(events), "rejected": rejected}, "model": model_info, "detectors": results, "by_type": by_type, "by_sensor": by_sensor,
             "limitations": limitations}
 
 
@@ -150,10 +165,11 @@ def main(argv=None):
     parser.add_argument("--test-after", help="Only score sessions starting at or after this ISO 8601 time")
     parser.add_argument("--config", help="Detection settings JSON (defaults to AEGIS_DETECTION_CONFIG)")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    parser.add_argument("--model", help="Also evaluate an Isolation Forest model directory (python -m aegis.ml train)")
     args = parser.parse_args(argv)
     try:
-        result = evaluate_dataset(args.dataset, load_config(args.config), args.test_after)
-    except (OSError, ValueError) as error:
+        result = evaluate_dataset(args.dataset, load_config(args.config), args.test_after, args.model)
+    except (OSError, ValueError, ml.ModelUnavailable) as error:
         print(f"Evaluation failed: {error}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2) if args.format == "json" else markdown(result))

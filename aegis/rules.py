@@ -24,11 +24,14 @@ DEFAULT_CONFIG = {
     "stats_peer_window_seconds": 604800,
     "stats_peer_min": 20,
     "stats_z_threshold": 3.5,
+    "ml_enabled": False,
+    "ml_max_model_age_days": 90,
     "disabled_rules": [],
 }
 RULE_IDS = ("AUTH-001", "AUTH-002", "DISC-001", "XFER-001", "XFER-002")
 SEQUENCE_IDS = ("SEQ-001", "SEQ-002")
 STAT_IDS = ("STAT-001", "STAT-002", "STAT-003", "STAT-004")
+ML_IDS = ("ML-001",)
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9_.+-]{1,64}$")
 
 
@@ -44,7 +47,8 @@ def validate_config(overrides=None):
     ranges = {"auth_failure_threshold": (2, 1000), "login_failure_threshold": (1, 1000),
               "auth_failure_window_seconds": (1, 86400), "login_lookback_seconds": (1, 86400),
               "sequence_window_seconds": (1, 604800), "stats_bucket_seconds": (60, 86400), "stats_baseline_buckets": (3, 2000),
-              "stats_min_baseline": (3, 2000), "stats_peer_window_seconds": (3600, 31536000), "stats_peer_min": (5, 100000)}
+              "stats_min_baseline": (3, 2000), "stats_peer_window_seconds": (3600, 31536000), "stats_peer_min": (5, 100000),
+              "ml_max_model_age_days": (1, 3650)}
     for key, (low, high) in ranges.items():
         value = config[key]
         if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
@@ -56,15 +60,16 @@ def validate_config(overrides=None):
     z = config["stats_z_threshold"]
     if not isinstance(z, (int, float)) or isinstance(z, bool) or not 2 <= z <= 50:
         raise ValueError("stats_z_threshold must be a number from 2 to 50")
-    if not isinstance(config["statistical_enabled"], bool):
-        raise ValueError("statistical_enabled must be true or false")
+    for flag in ("statistical_enabled", "ml_enabled"):
+        if not isinstance(config[flag], bool):
+            raise ValueError(f"{flag} must be true or false")
     if config["auth_group_by"] not in ("sensor_and_source", "source"):
         raise ValueError("auth_group_by must be sensor_and_source or source")
     commands = config["discovery_commands"]
     if not isinstance(commands, list) or not 1 <= len(commands) <= 100 or not all(isinstance(c, str) and COMMAND_NAME.match(c) for c in commands):
         raise ValueError("discovery_commands must list 1-100 command names (letters, digits, . _ + -)")
     disabled = config["disabled_rules"]
-    known = RULE_IDS + SEQUENCE_IDS + STAT_IDS
+    known = RULE_IDS + SEQUENCE_IDS + STAT_IDS + ML_IDS
     if not isinstance(disabled, list) or not set(disabled) <= set(known):
         raise ValueError(f"disabled_rules may contain only: {', '.join(known)}")
     config["discovery_commands"] = sorted(set(commands))

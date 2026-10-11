@@ -157,8 +157,8 @@ app factory.
 | Rotation / partial / malformed / dup / DB-outage tested | ◐ partial (rotation, partial, dup yes; malformed-continue + DB-outage no) |
 | Provenance + synthetic/live separation preserved in exports | ✓ (Phase 1-2) |
 | Findings carry reproducible rationale + exact evidence IDs | ✓ (Phase 2) |
-| Rule/stat/ML layers fail independently | ◐ rules + statistics verified; ML not built |
-| ML disabled by default until evaluated | n/a — not built |
+| Rule/stat/ML layers fail independently | ✓ (verified per layer, Phases 2-4) |
+| ML disabled by default until evaluated | ✓ (`ml_enabled` false; no labeled evaluation yet) |
 | Authn/authz, validation, rate limits, secret handling reviewed | ◐ validation/CSRF yes; no authn, no rate limits |
 | Migrations, backup, restore tested | ✗ no migration framework |
 | Health, readiness, lag, error metrics | ✗ single health blob |
@@ -257,3 +257,20 @@ First run of 2.0 against real telemetry: the AWS honeypot's raw Cowrie 3.1.1 log
 - Scanners send HTTP requests and TLS bytes as SSH client versions. These are kept as observed and shown escaped in the UI; a regression test uses the same shapes.
 
 The deployed 1.0 honeypot was not modified. The sensor-name fix applies to future deployments.
+
+---
+
+## Phase 4 progress (2026-10-11)
+
+Implemented, with tests:
+
+- `aegis/features.py`: versioned (v1) pure-Python session features with log1p transform.
+- `aegis/ml.py`: Isolation Forest training CLI (database window with a required `--until`, or a labeled set with optional `--benign-only`); synthetic data refused unless explicitly allowed and marked; at least 50 sessions; never overwrites. Manifest with provenance, parameters, library versions, a calibrated 99th-percentile threshold, and the model digest; critical fields duplicated inside the digest-protected bundle.
+- Fail-closed loading: digest verified before unpickling; feature and library version checks, age limit, edited-manifest detection, synthetic models refused on observed data, missing dependency reported. An unusable model yields no ML findings and supersedes earlier ones; scoring errors are isolated.
+- Runtime: `ml_enabled` defaults to false; ML findings (`ML-001`, `score_type = isolation_forest_anomaly`, training percentile) are low-severity signals attached to related incidents, never incidents themselves. Migration 5 (`ml_state`); recompute on model change, throttled with statistics.
+- Evaluation: `labeled_eval --model` adds ML metrics with leakage warnings.
+- Packaging: `requirements-ml.txt` pinned to releases at least two weeks old; `INSTALL_ML` Docker build argument; models excluded from git and images.
+
+Verification: 111 tests pass. Ten deliberate mutations (no digest check, unpickling before verification, trusted manifest edits, synthetic model allowed, ML on by default, no threshold, training window ignored, no leakage warning, model change unnoticed, scoring errors escaping) each made a test fail. Both Docker images build; the default image fails closed with `dependency`, and a model trained on Python 3.14 was verified and loaded inside the ML image (Python 3.12) with a read-only filesystem, no network, and all capabilities dropped. Real data: a model trained on the first 87 honeypot sessions flagged only the session `SEQ-001` already caught and none of 59 later sessions. ML adds no value on this data yet, consistent with keeping it off.
+
+Gate changes: "ML is disabled by default until evaluation supports enabling it" → ✓. "Rule, statistical and optional ML layers can fail independently" → ✓ (each verified).

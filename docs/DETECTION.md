@@ -1,6 +1,6 @@
 # Detection reference (ruleset 2026.10.2)
 
-Detection is layered: canonical events → deterministic rules (Layer A), sequences (Layer D), and statistics (Layer B) → evidence fusion into incidents. Optional ML (Layer C) is not implemented yet. Everything here is deterministic and covered by fixtures in `aegis/evaluate.py` (31 checks, also shown under **Lab & validation**). To measure detection against labeled data, see [EVALUATION.md](EVALUATION.md).
+Detection is layered: canonical events → deterministic rules (Layer A), sequences (Layer D), and statistics (Layer B) → evidence fusion into incidents. Optional ML (Layer C) is implemented but off by default (see below). Everything here is deterministic and covered by fixtures in `aegis/evaluate.py` (31 checks, also shown under **Lab & validation**). To measure detection against labeled data, see [EVALUATION.md](EVALUATION.md).
 
 ## Canonical events (schema 2)
 
@@ -56,6 +56,37 @@ A honeypot sees a small, biased slice of attacker behavior, so statistics here a
 
 **Execution.** Statistics recompute for a whole dataset after uploads and replays, at most every 60 seconds during live collection, and whenever a read finds them behind the data. A statistics failure is recorded and retried without affecting ingestion or rules. Set `statistical_enabled` to `false` to turn the layer off.
 
+## Optional ML (Layer C)
+
+An Isolation Forest scores session features. It is **off by default** and stays off until a labeled evaluation shows it adds value. Enabling it takes both `"ml_enabled": true` in the detection settings and a verified model in `AEGIS_ML_MODEL_DIR`.
+
+**Features** (`aegis/features.py`, version 1, each passed through `log1p`): events, duration, failed and accepted logins, distinct usernames, commands, distinct commands, failed commands, mean command length, discovery commands, downloads, uploads, tunnel requests, whether a client version was sent, and events per minute.
+
+**Training is manual and explicit.** It never happens automatically, because attacker-controlled traffic can poison a baseline:
+
+```bash
+python3 -m aegis.ml train --db data/aegis.sqlite3 --dataset live --until 2026-10-20T00:00:00Z --out models/live-2026-10-20
+python3 -m aegis.ml train --labeled path/to/dataset --benign-only --out models/labeled-v1
+python3 -m aegis.ml inspect models/live-2026-10-20     # verify and print the manifest
+```
+
+- `--until` is required: the end of the window you reviewed. Later events are never used.
+- Synthetic data (the demo dataset, or a labeled set marked synthetic) is refused unless you pass `--allow-synthetic`, and the model is then marked synthetic. A synthetic model is refused when scoring observed telemetry.
+- At least 50 sessions are required. An existing output directory is never overwritten.
+- Parameters are fixed and recorded (`n_estimators=200`, `contamination="auto"`, `random_state=42`).
+
+**Manifest (`model.json`):** model version, algorithm and parameters, feature version and list, training window, source, session count and synthetic flag, calibrated threshold (by default, the 99th percentile of training scores), library versions, training time, and the SHA-256 of `model.joblib`.
+
+**Fails closed.** A model is used only after these checks pass, in this order: the manifest is readable; the format is supported; `model.joblib` matches the recorded digest (nothing is unpickled before this); the feature version matches; the scikit-learn version matches; the model is younger than `ml_max_model_age_days` (default 90); the threshold, feature version, training time, and synthetic flag in the manifest match the copies inside the verified file; and the model is not synthetic when scoring observed data. Otherwise the status is `missing`, `integrity`, `stale`, `incompatible`, `rejected`, or `dependency` (scikit-learn not installed), no ML findings are produced, earlier ML findings are superseded, and rules and statistics continue. Unexpected scoring errors mark the layer for recomputation without affecting the other layers.
+
+Model files use pickle (through joblib). The digest check stops accidental or casual tampering, but keep the model directory operator-controlled and never load models from untrusted sources.
+
+**Findings (`ML-001`)** are low-severity signals that never create incidents. They carry `score` (the raw `-score_samples` value; higher is more unusual) with `score_type` = `isolation_forest_anomaly`, plus the training percentile, threshold, model and feature versions, training summary, the session's feature values, and the three features furthest from the training medians. Those three are context only: Isolation Forest does not attribute its score to features. The score is never presented as a probability.
+
+**First real-data run (2026-10-11).** Trained on the 87 honeypot sessions before 2026-10-10 12:00 UTC and scored all 146. It flagged one session, the login, discovery, and download session that `SEQ-001` already caught (mean command length 1,132 characters), and none of the 59 later sessions. On two days of mostly scanner traffic, ML added nothing beyond the rules, which is why it stays off by default.
+
+**Installing.** scikit-learn is optional: `pip install -r requirements-ml.txt`, or build the image with `--build-arg INSTALL_ML=true` (about 78 MB larger). Mount the model directory read-only.
+
 ## Finding contract
 
 Every finding, from any engine, has: `finding_id` (stable hash of dataset, engine, rule, rule version, and dedup key), `engine`, `rule_id`, `rule_version`, `title`, `description`, `category`, `severity`, `severity_rationale`, `technique` (a candidate ATT&CK mapping), `observed_at` (when the condition first held), `first_seen`, `last_seen`, `session`, `session_key`, `sensor`, `src_ip`, `evidence_event_ids`, `rationale` (`explanation` text plus machine-readable `facts`), `score` and `score_type` (both null for rules and sequences), `dedup_key`, `status` (`active` or `superseded`), and, when stored, `created_at` and `updated_at`. `id`, `name`, and `evidence_ids` are kept as aliases for 1.x clients.
@@ -92,11 +123,13 @@ Set `AEGIS_DETECTION_CONFIG` to a JSON file. Unknown keys or out-of-range values
   "stats_peer_window_seconds": 604800,
   "stats_peer_min": 20,
   "stats_z_threshold": 3.5,
+  "ml_enabled": false,
+  "ml_max_model_age_days": 90,
   "disabled_rules": []
 }
 ```
 
-`auth_group_by` may be `source` to correlate failures across sensors. `disabled_rules` accepts any rule, sequence, or statistic ID. The active settings, fingerprint, and catalog are available at `GET /api/v1/detection`. Changing settings through the API requires authentication (Phase 7) and is not offered yet.
+`auth_group_by` may be `source` to correlate failures across sensors. `disabled_rules` accepts any rule, sequence, statistic, or ML ID. `ml_enabled` (default `false`) and `ml_max_model_age_days` (default 90) control the optional ML layer. The active settings, fingerprint, and catalog are available at `GET /api/v1/detection`. Changing settings through the API requires authentication (Phase 7) and is not offered yet.
 
 ## Execution model
 

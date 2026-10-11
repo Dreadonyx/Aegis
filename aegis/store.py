@@ -148,6 +148,18 @@ MIGRATIONS.append((4, "Statistical baseline state", [
     "CREATE INDEX findings_engine ON findings(dataset, engine, status)",
 ]))
 
+MIGRATIONS.append((5, "ML scoring state", [
+    """CREATE TABLE ml_state(
+        dataset TEXT PRIMARY KEY,
+        fingerprint TEXT,
+        computed_at TEXT,
+        event_count INTEGER,
+        baselines TEXT,
+        dirty INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT)""",
+]))
+SIGNAL_TABLES = {"statistical": "stats_state", "ml": "ml_state"}
+
 RANK = {"low": 1, "medium": 2, "high": 3}
 # Validated workflow. Closed cases (resolved, false_positive) are reopened before changing outcome.
 TRANSITIONS = {
@@ -448,15 +460,16 @@ class Store:
             merged += 1
         return merged
 
-    def replace_signals(self, dataset, compute, fingerprint):
-        """Recompute statistical findings for a whole dataset (baselines need all of it). They are stored
+    def replace_signals(self, dataset, compute, fingerprint, engine="statistical"):
+        """Recompute one signal engine's findings (statistical or ml) for a whole dataset. They are stored
         without an incident: an anomaly alone is a signal, not a case."""
+        table = SIGNAL_TABLES[engine]
         now = utcnow()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             events = [json.loads(r[0]) for r in db.execute("SELECT body FROM events WHERE source=?", (dataset,))]
             result = compute(events)
-            old = {r[0] for r in db.execute("SELECT finding_id FROM findings WHERE dataset=? AND engine='statistical' AND status='active'", (dataset,))}
+            old = {r[0] for r in db.execute("SELECT finding_id FROM findings WHERE dataset=? AND engine=? AND status='active'", (dataset, engine))}
             new = set()
             for f in result["findings"]:
                 new.add(f["finding_id"])
@@ -468,21 +481,27 @@ class Store:
             for part in chunks(stale):
                 db.execute(f"UPDATE findings SET status='superseded', updated_at=? WHERE finding_id IN ({marks(part)})", [now, *part])
             state = {k: v for k, v in result.items() if k != "findings"}
-            db.execute("""INSERT INTO stats_state VALUES (?,?,?,?,?,0,NULL) ON CONFLICT(dataset) DO UPDATE SET fingerprint=excluded.fingerprint,
+            db.execute(f"""INSERT INTO {table} VALUES (?,?,?,?,?,0,NULL) ON CONFLICT(dataset) DO UPDATE SET fingerprint=excluded.fingerprint,
                 computed_at=excluded.computed_at, event_count=excluded.event_count, baselines=excluded.baselines, dirty=0, last_error=NULL""",
                 (dataset, fingerprint, now, len(events), json.dumps(state)))
         return dict(findings=len(new), superseded=len(stale))
 
     def stats_state(self, dataset):
+        return self.signal_state(dataset, "statistical")
+
+    def signal_state(self, dataset, engine):
         with self.connect() as db:
-            row = db.execute("SELECT fingerprint, computed_at, event_count, baselines, dirty, last_error FROM stats_state WHERE dataset=?", (dataset,)).fetchone()
+            row = db.execute(f"SELECT fingerprint, computed_at, event_count, baselines, dirty, last_error FROM {SIGNAL_TABLES[engine]} WHERE dataset=?", (dataset,)).fetchone()
         if not row:
             return None
         return dict(fingerprint=row[0], computed_at=row[1], event_count=row[2], **(json.loads(row[3]) if row[3] else {}), dirty=row[4], last_error=row[5])
 
     def mark_stats_dirty(self, dataset, error):
+        self.mark_signal_dirty(dataset, error, "statistical")
+
+    def mark_signal_dirty(self, dataset, error, engine):
         with self.connect() as db:
-            db.execute("""INSERT INTO stats_state(dataset, dirty, last_error) VALUES (?,1,?) ON CONFLICT(dataset) DO UPDATE SET
+            db.execute(f"""INSERT INTO {SIGNAL_TABLES[engine]}(dataset, dirty, last_error) VALUES (?,1,?) ON CONFLICT(dataset) DO UPDATE SET
                 dirty=1, last_error=excluded.last_error""", (dataset, error[:200]))
 
     def event_count(self, dataset):
@@ -494,7 +513,7 @@ class Store:
         its time span. Related, not merged."""
         with self.connect() as db:
             rows = [json.loads(r[0]) for r in db.execute(
-                "SELECT body FROM findings WHERE dataset=? AND engine='statistical' AND status='active'", (incident["source"],))]
+                "SELECT body FROM findings WHERE dataset=? AND engine IN ('statistical', 'ml') AND status='active'", (incident["source"],))]
         keys, sensors = set(incident.get("session_keys", [])), set(incident.get("sensors", [incident.get("sensor")]))
 
         def related(f):
