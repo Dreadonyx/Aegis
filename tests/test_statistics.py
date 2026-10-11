@@ -240,3 +240,22 @@ def test_labeled_evaluation_cli_and_input_errors(tmp_path, capsys):
     twice = labeled_events() + [raw(50, session="in", sensor="other")]
     ambiguous = write_dataset(tmp_path / "ambiguous", [{"session": "in", "label": "malicious"}], twice)
     assert labeled_eval.main([str(ambiguous)]) == 2 and "add a sensor field" in capsys.readouterr().err
+
+
+def test_sql_series_matches_the_in_memory_reference(tmp_path):
+    from aegis.canonical import normalize
+    from aegis.store import Store
+    records = spike(final=30) + [
+        raw(5, eventid="cowrie.login.failed", username="root", sensor="b"), raw(6, eventid="cowrie.login.failed", username="", sensor="b"),
+        raw(7, eventid="cowrie.login.success", username="admin", session="x7"), raw(8, eventid="cowrie.command.input", input="uname -a", session="x7"),
+        raw(9, eventid="cowrie.command.input", input="hostname", realm="cat", session="x7"),  # stdin, not a shell command
+        raw(10, eventid="cowrie.session.closed", duration_ms=0, session="x7"),  # 0 ms is a real duration
+        raw(4000, eventid="cowrie.session.closed", duration_ms=120000, session="h1-0"), raw(4001, src_ip="198.51.100.9", sensor="b")]
+    events = [normalize(r, "imported") for r in records]
+    store = Store(tmp_path / "db.sqlite3")
+    store.ingest(events)
+    for since, until in ((None, None), ("2026-01-01T01:00:00.000000+00:00", "2026-01-01T05:00:00.000000+00:00")):
+        chosen = [e for e in events if (since is None or e["timestamp"] >= since) and (until is None or e["timestamp"] < until)]
+        assert store.series("imported", 3600, since, until) == statistics.describe(chosen, 3600, since, until)
+    result = store.series("imported", 3600)
+    assert result["sessions"]["duration_ms"]["count"] == 2 and result["series"][0]["distinct_commands"] == 1

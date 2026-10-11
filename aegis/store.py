@@ -590,6 +590,37 @@ class Store:
         with self.connect() as db:
             return [json.loads(r[0]) for r in db.execute(f"SELECT body FROM events WHERE {' AND '.join(where)} ORDER BY event_time, id", args)]
 
+    def series(self, dataset, bucket_seconds, since=None, until=None):
+        """The same descriptive analytics as statistics.describe, aggregated in SQLite instead of loading events."""
+        from aegis.statistics import series_from_aggregates
+        where, args = ["source=?"], [dataset]
+        if since:
+            where.append("event_time >= ?")
+            args.append(since)
+        if until:
+            where.append("event_time < ?")
+            args.append(until)
+        scope = " AND ".join(where)
+        bucket = f"(CAST(strftime('%s', substr(event_time, 1, 19)) AS INTEGER) / {int(bucket_seconds)})"
+        buckets = {}
+        with self.connect() as db:
+            for b, events, sources, sessions in db.execute(
+                    f"SELECT {bucket} AS b, count(*), count(DISTINCT src_ip), count(DISTINCT sensor || '|' || src_ip || '|' || session) "
+                    f"FROM events WHERE {scope} GROUP BY b", args):
+                buckets[b] = {"events": events, "by_event_type": {}, "sources": sources, "usernames": 0, "commands": 0, "sessions": sessions}
+            for b, kind, n in db.execute(f"SELECT {bucket} AS b, coalesce(event_type, 'other'), count(*) FROM events WHERE {scope} GROUP BY b, 2", args):
+                buckets[b]["by_event_type"][kind] = n
+            for b, n in db.execute(f"SELECT {bucket} AS b, count(DISTINCT json_extract(body, '$.username')) FROM events WHERE {scope} "
+                                   "AND eventid LIKE 'cowrie.login.%' AND coalesce(json_extract(body, '$.username'), '') != '' GROUP BY b", args):
+                buckets[b]["usernames"] = n
+            for b, n in db.execute(f"SELECT {bucket} AS b, count(DISTINCT json_extract(body, '$.input')) FROM events WHERE {scope} "
+                                   "AND eventid = 'cowrie.command.input' AND coalesce(json_extract(body, '$.realm'), '') = '' GROUP BY b", args):
+                buckets[b]["commands"] = n
+            sessions = db.execute(
+                f"SELECT count(*), max(CASE WHEN eventid = 'cowrie.session.closed' THEN json_extract(body, '$.duration_ms') END) "
+                f"FROM events WHERE {scope} GROUP BY sensor, src_ip, session", args).fetchall()
+        return series_from_aggregates(buckets, sessions, bucket_seconds, since, until)
+
     def finding_counts(self, dataset):
         with self.connect() as db:
             rows = db.execute("SELECT engine, severity, count(*) FROM findings WHERE dataset=? AND status='active' GROUP BY engine, severity", (dataset,)).fetchall()

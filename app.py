@@ -80,6 +80,7 @@ def runtime_settings(environ=None):
             "metrics_token": env.get("AEGIS_METRICS_TOKEN") or None, "session_hours": float(env.get("AEGIS_SESSION_HOURS", "8"))}
 
 
+OVERVIEW_INCIDENTS = 500  # the queue shows the most severe and recent; /api/v1/incidents pages through the rest
 PUBLIC_PATHS = {"/login", "/api/v1/health/live", "/api/v1/health/ready", "/api/v1/auth/login", "/api/v1/auth/me"}
 ADMIN_ENDPOINTS = {"update_detection_settings"}
 # (requests, seconds) per client for expensive endpoints.
@@ -306,9 +307,11 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
         source = source_arg()
         analyzer.ensure_current(source)
         stats = store.overview(source)
-        _, found = store.incidents(source)
-        return jsonify(events=stats["events"], incidents=[summary(i) for i in found], sources=stats["sources"], sensors=stats["sensors"],
-            open_incidents=sum(i["status"] in ("open", "investigating") for i in found), timeline=stats["timeline"],
+        total, found = store.incidents(source, limit=OVERVIEW_INCIDENTS)
+        active = store.incidents(source, "open", limit=1)[0] + store.incidents(source, "investigating", limit=1)[0]
+        return jsonify(events=stats["events"], incidents=[summary(i) for i in found], incidents_total=total,
+            incidents_truncated=total > len(found), sources=stats["sources"], sensors=stats["sensors"],
+            open_incidents=active, timeline=stats["timeline"],
             rules=analyzer.catalog, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")), ruleset_version=RULESET_VERSION,
             dataset_label=DATASET_LABELS[source], detection=store.detection_state(source), storage=store.usage(),
             statistics=statistics_summary(source), ml=ml_summary(source),
@@ -366,7 +369,7 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
         except ValueError:
             raise ValueError("bucket must be from 60 to 86400 seconds") from None
         since, until = time_arg("since"), time_arg("until")
-        result = describe(store.events_between(source, since, until), bucket, since, until)
+        result = store.series(source, bucket, since, until)
         return jsonify(dataset=source, since=since, until=until, **result)
 
     @app.get("/api/v1/incidents")

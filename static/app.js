@@ -91,8 +91,8 @@ async function load({background = false} = {}) {
     $('#detection-strip').innerHTML = `<span>Active findings</span>${[['rule', 'Rules'], ['sequence', 'Sequences'], ['statistical', 'Statistics'], ['ml', 'ML']]
       .map(([k, label]) => `<button class="strip-item" data-findings-engine="${k}"><strong>${byEngine[k] || 0}</strong> ${label}</button>`).join('')}
       <span class="strip-note">${esc(data.dataset_label)}</span>`;
-    $('#nav-count').textContent = data.incidents.length;
-    $('#incident-count').textContent = data.incidents.length;
+    $('#nav-count').textContent = data.incidents_total.toLocaleString();
+    $('#incident-count').textContent = data.incidents_total.toLocaleString();
     $('#collector-status').textContent = data.collector;
     $('#storage-status').textContent = `${data.storage.events.toLocaleString()} / ${data.storage.limit.toLocaleString()} events across all datasets`;
     $('#ai-status').textContent = data.ai_enabled ? 'Local model configured; drafts require review' : 'Not configured · rule-based reports available';
@@ -146,6 +146,7 @@ function renderQueue() {
     <div class="incident-bottom"><span>${i.findings.length} finding${i.findings.length === 1 ? '' : 's'}</span>
     <span class="workflow-state ${esc(i.status)}">${i.status === 'resolved' ? '✓ ' : ''}${esc(statusLabel(i.status))}</span></div></button>`).join('')
     : '<div class="empty compact"><h2>No matching incidents</h2><p>Replay the demo, import events, or adjust the filters.</p></div>';
+  if (overview.incidents_truncated) $('#incident-list').insertAdjacentHTML('beforeend', `<p class="queue-note">Showing the ${overview.incidents.length.toLocaleString()} most severe and recent of ${overview.incidents_total.toLocaleString()} incidents. Filters apply to these; the Findings view and /api/v1/incidents cover the rest.</p>`);
 }
 
 function renderAnalystActivity(activity) {

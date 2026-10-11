@@ -5,28 +5,29 @@ Measured 2026-10-11 with `python -m aegis.loadtest --events 50000` on a 16-core 
 | Measure | Result |
 |---|---|
 | Events / sessions | 50,000 / 12,178 |
-| Incidents / active findings | 1,968 / 2,309 |
-| Live-style ingestion (500-event batches, detection after each commit) | 3,574 events/s; batch p50 140.5 ms, p95 233.4 ms |
-| Full detection and statistics recompute | 1.55 s |
+| Incidents / active findings | 500 / 2,309 |
+| Live-style ingestion (500-event batches, detection after each commit) | 3,659 events/s; batch p50 132.7 ms, p95 216.9 ms |
+| Full detection and statistics recompute | 1.41 s |
 | Database size | 81.9 MB |
 | Evidence chain after load | valid |
 
-API latency (application time through the WSGI test client, 15 requests each):
+API latency (application time through the WSGI test client, 15 requests each, measured right after ingestion):
 
 | Endpoint | p50 ms | p95 ms |
 |---|---|---|
-| overview | 132.3 | 324.2 |
-| events page | 2.1 | 2.8 |
-| filtered events | 1.4 | 1.6 |
-| incidents | 5.5 | 9.0 |
-| findings | 4.0 | 4.2 |
-| session timeline | 15.8 | 18.2 |
-| statistics | 6.7 | 7.6 |
-| series (hourly) | 471.4 | 531.0 |
-| metrics | 1.7 | 3.4 |
+| overview | 59.8 | 232.1 |
+| events page | 2.0 | 3.2 |
+| filtered events | 1.3 | 1.7 |
+| incidents | 5.6 | 6.5 |
+| findings | 3.9 | 5.8 |
+| session timeline | 15.7 | 17.3 |
+| statistics | 6.6 | 8.1 |
+| series (hourly) | 186.4 | 233.2 |
+| metrics | 1.6 | 2.6 |
 
 ## Reading the numbers
 
+- The overview's p95 is the first read after a bulk ingest, when deferred statistics catch up. During live collection statistics recompute at most every 60 seconds, so ingestion stays fast; in steady use consecutive overview requests took 67–102 ms.
+- The overview returns the 500 most severe and recent incidents plus true totals; `/api/v1/incidents` pages through the rest. Hourly series are aggregated in SQLite (equivalent to the in-memory reference, which a test checks).
+- Before these optimizations (same data): overview p50 132 ms / p95 324 ms; hourly series p50 471 ms / p95 531 ms.
 - The real AWS sensor produced about 441 events in 41 hours. Ingestion capacity is several orders of magnitude above that; the 50,000-event cap is reached long before throughput matters.
-- The overview and the hourly series are the slowest reads, because they summarize the whole dataset in Python. They are acceptable at the cap; if the cap is raised, precompute their aggregates in SQL first.
-- Statistics recompute at most every 60 seconds during live collection, and reads catch up, so ingestion cost stays flat.

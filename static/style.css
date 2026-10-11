@@ -1712,3 +1712,10 @@ dialog pre {
   border-color:#cce1d5;
   cursor:default
 }
+
+.queue-note {
+  font-size:11px;
+  color:var(--muted);
+  padding:10px 18px;
+  line-height:1.6
+}

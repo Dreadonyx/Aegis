@@ -289,3 +289,15 @@ def test_real_world_client_version_shapes():
     assert binary["client_version"] == "\x16\x03\x01\x02\x00\x01"  # kept as observed; the UI shows control characters escaped
     assert "client_version" not in ev(eventid="cowrie.client.version", version="")
     assert "uuid" not in ev(eventid="cowrie.session.connect", uuid="00000000-0000-4000-8000-000000000000")  # undocumented field stays in raw evidence only
+
+
+def test_overview_queue_is_bounded_with_true_totals(client, monkeypatch):
+    import app as module
+    monkeypatch.setattr(module, "OVERVIEW_INCIDENTS", 2)
+    client.post("/api/replay")
+    overview = client.get("/api/overview").get_json()
+    assert len(overview["incidents"]) == 2 and overview["incidents_total"] == 3 and overview["incidents_truncated"] is True
+    assert overview["open_incidents"] == 3  # counted in SQL, not from the truncated list
+    incident = overview["incidents"][0]["id"]
+    client.patch(f"/api/incidents/{incident}", json={"status": "resolved"})
+    assert client.get("/api/overview").get_json()["open_incidents"] == 2

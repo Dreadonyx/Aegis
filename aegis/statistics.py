@@ -203,25 +203,9 @@ def compute(events, config):
 MAX_BUCKETS = 1000
 
 
-def describe(events, bucket_seconds, since=None, until=None):
-    """Descriptive analytics for charts: per-bucket counts and distinct counts over an explicit, zero-filled
-    range (since/until, or the span of the events), plus session summaries."""
-    buckets, sessions = {}, {}
-    for e in events:
-        b = int(ts(e) // bucket_seconds)
-        row = buckets.setdefault(b, {"events": 0, "by_event_type": {}, "sources": set(), "usernames": set(), "commands": set(), "sessions": set()})
-        row["events"] += 1
-        row["by_event_type"][e.get("event_type", "other")] = row["by_event_type"].get(e.get("event_type", "other"), 0) + 1
-        row["sources"].add(e["src_ip"])
-        row["sessions"].add(session_key(e))
-        if e.get("username") and e["eventid"].startswith("cowrie.login."):
-            row["usernames"].add(e["username"])
-        if is_shell_command(e):
-            row["commands"].add(e["input"])
-        session = sessions.setdefault(session_key(e), {"events": 0, "duration_ms": None})
-        session["events"] += 1
-        if e["eventid"] == "cowrie.session.closed" and isinstance(e.get("duration_ms"), (int, float)):
-            session["duration_ms"] = e["duration_ms"]
+def series_from_aggregates(buckets, sessions, bucket_seconds, since=None, until=None):
+    """Shared builder for descriptive analytics. `buckets` maps bucket index to counts and distinct sets (or
+    distinct counts); `sessions` lists (events, duration_ms or None). Used by the in-memory and SQL paths."""
     seconds = lambda value: datetime.fromisoformat(value).timestamp()
     first = int(seconds(since) // bucket_seconds) if since else min(buckets, default=None)
     last = int((seconds(until) - 1) // bucket_seconds) if until else max(buckets, default=None)
@@ -231,10 +215,11 @@ def describe(events, bucket_seconds, since=None, until=None):
         raise ValueError(f"The range produces more than {MAX_BUCKETS:,} buckets; narrow it or use a larger bucket")
     else:
         indexes = range(first, last + 1)
-    empty = {"events": 0, "by_event_type": {}, "sources": (), "usernames": (), "commands": (), "sessions": ()}
-    series = [{"bucket_start": iso(b * bucket_seconds), "events": r["events"], "by_event_type": r["by_event_type"],
-               "distinct_sources": len(r["sources"]), "distinct_usernames": len(r["usernames"]),
-               "distinct_commands": len(r["commands"]), "sessions": len(r["sessions"])} for b in indexes for r in [buckets.get(b, empty)]]
+    size = lambda v: v if isinstance(v, int) else len(v)
+    empty = {"events": 0, "by_event_type": {}, "sources": 0, "usernames": 0, "commands": 0, "sessions": 0}
+    series = [{"bucket_start": iso(b * bucket_seconds), "events": r["events"], "by_event_type": dict(sorted(r["by_event_type"].items())),
+               "distinct_sources": size(r["sources"]), "distinct_usernames": size(r["usernames"]),
+               "distinct_commands": size(r["commands"]), "sessions": size(r["sessions"])} for b in indexes for r in [buckets.get(b, empty)]]
     for previous, row in zip(series, series[1:]):
         row["change_from_previous"] = row["events"] - previous["events"]
 
@@ -243,9 +228,31 @@ def describe(events, bucket_seconds, since=None, until=None):
             return None
         values = sorted(values)
         return {"count": len(values), "median": stats.median(values), "p90": values[min(len(values) - 1, int(0.9 * len(values)))]}
-    timed = [s for s in sessions.values() if s["duration_ms"]]
+    timed = [(n, d) for n, d in sessions if d is not None]  # 0 ms is a real duration (scanners close at once)
     return {"bucket_seconds": bucket_seconds, "series": series,
-            "sessions": {"total": len(sessions), "events_per_session": summary([s["events"] for s in sessions.values()]),
-                         "duration_ms": summary([s["duration_ms"] for s in timed]),
-                         "events_per_minute": summary([round(s["events"] / (s["duration_ms"] / 60000), 3) for s in timed]),
-                         "note": "Duration and density use only sessions with a Cowrie session-close record."}}
+            "sessions": {"total": len(sessions), "events_per_session": summary([n for n, _ in sessions]),
+                         "duration_ms": summary([d for _, d in timed]),
+                         "events_per_minute": summary([round(n / (max(d, 1000) / 60000), 3) for n, d in timed]),
+                         "note": "Duration and density use only sessions with a Cowrie session-close record; density counts at least one second."}}
+
+
+def describe(events, bucket_seconds, since=None, until=None):
+    """Descriptive analytics computed in memory (the API uses the equivalent SQL path, Store.series)."""
+    buckets, sessions = {}, {}
+    for e in events:
+        b = int(ts(e) // bucket_seconds)
+        row = buckets.setdefault(b, {"events": 0, "by_event_type": {}, "sources": set(), "usernames": set(), "commands": set(), "sessions": set()})
+        key = (e["source"], e["sensor"], e["src_ip"], e["session"])
+        row["events"] += 1
+        row["by_event_type"][e.get("event_type", "other")] = row["by_event_type"].get(e.get("event_type", "other"), 0) + 1
+        row["sources"].add(e["src_ip"])
+        row["sessions"].add(key)
+        if e.get("username") and e["eventid"].startswith("cowrie.login."):
+            row["usernames"].add(e["username"])
+        if is_shell_command(e):
+            row["commands"].add(e["input"])
+        session = sessions.setdefault(key, [0, None])
+        session[0] += 1
+        if e["eventid"] == "cowrie.session.closed" and isinstance(e.get("duration_ms"), (int, float)):
+            session[1] = max(e["duration_ms"], session[1] or 0)
+    return series_from_aggregates(buckets, [tuple(v) for v in sessions.values()], bucket_seconds, since, until)
