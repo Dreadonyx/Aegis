@@ -271,7 +271,7 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
             raise ValueError("username and password are required")
         username = body["username"].strip().lower()[:64]
         for key, rule in ((f"login-ip:{request.remote_addr}", (20, 300)), (f"login-user:{username}", (5, 300))):
-            wait = limiter.hit(key, *rule)
+            wait = store.limit_hit(key, *rule)  # persisted: a restart does not reset sign-in lockouts
             if wait:
                 response = jsonify(error="Too many sign-in attempts. Wait and try again.")
                 response.headers["Retry-After"] = str(wait)
@@ -280,7 +280,7 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
         if not verify(account["password_hash"] if account else None, body["password"]) or account["disabled"]:
             app.logger.warning(json.dumps({"event": "login_failed", "username": username, "remote": request.remote_addr}))
             return jsonify(error="Invalid username or password."), 401
-        limiter.reset(f"login-user:{username}")
+        store.limit_reset(f"login-user:{username}")
         session.clear()  # new session on sign-in: no fixation
         session.permanent = True
         session.update(user=account["username"], role=account["role"], csrf=secrets.token_hex(32))

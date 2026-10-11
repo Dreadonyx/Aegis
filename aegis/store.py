@@ -203,6 +203,9 @@ MIGRATIONS.append((7, "Accounts, persisted settings, and settings history", [
         before_value TEXT,
         after_value TEXT)""",
 ]))
+MIGRATIONS.append((8, "Persistent sign-in rate limits", [
+    "CREATE TABLE rate_limits(key TEXT PRIMARY KEY, window_start REAL NOT NULL, count INTEGER NOT NULL)",
+]))
 LABEL_TYPES = ("credential_access", "discovery", "transfer", "intrusion_sequence", "anomaly")
 
 RANK = {"low": 1, "medium": 2, "high": 3}
@@ -767,6 +770,25 @@ class Store:
         with self.connect() as db:
             return [{"actor": a, "changed_at": t, "before": json.loads(b) if b else None, "after": json.loads(v)}
                     for a, t, b, v in db.execute("SELECT actor, changed_at, before_value, after_value FROM settings_history WHERE key=? ORDER BY id DESC LIMIT ?", (key, limit))]
+
+    def limit_hit(self, key, limit, window, now=None):
+        """Fixed-window counter in the database, so sign-in lockouts survive restarts. Returns seconds to wait
+        when over the limit, otherwise 0."""
+        import time
+        now = time.time() if now is None else now
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM rate_limits WHERE window_start < ?", (now - 86400,))  # keep the table small
+            row = db.execute("SELECT window_start, count FROM rate_limits WHERE key=?", (key,)).fetchone()
+            start, count = row if row and now - row[0] < window else (now, 0)
+            count += 1
+            db.execute("INSERT INTO rate_limits VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET window_start=excluded.window_start, count=excluded.count",
+                       (key, start, count))
+        return 0 if count <= limit else int(window - (now - start)) + 1
+
+    def limit_reset(self, key):
+        with self.connect() as db:
+            db.execute("DELETE FROM rate_limits WHERE key=?", (key,))
 
     # --- Analyst labels ----------------------------------------------------------------------
 

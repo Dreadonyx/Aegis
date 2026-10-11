@@ -78,6 +78,19 @@ def test_sign_in_is_generic_rate_limited_and_rotates_the_session(tmp_path):
     assert ok.post("/api/v1/auth/logout").status_code == 200 and ok.get("/api/overview").status_code == 401
 
 
+def test_sign_in_lockout_survives_a_restart(tmp_path):
+    app = secure_app(tmp_path)
+    for _ in range(5):
+        assert signed_in(app, "vera", "wrong password!!")[1].status_code == 401
+    restarted = create_app(tmp_path / "aegis.sqlite3", settings=runtime_settings({"AEGIS_AUTH": "required"}))
+    restarted.config["TESTING"] = True
+    _, response = signed_in(restarted, "vera")  # even the right password waits out the lockout
+    assert response.status_code == 429 and int(response.headers["Retry-After"]) > 0
+    store = restarted.extensions["store"]
+    assert store.limit_hit("probe", 1, 300, now=1000.0) == 0 and store.limit_hit("probe", 1, 300, now=1001.0) == 300
+    assert store.limit_hit("probe", 1, 300, now=1400.0) == 0  # a new window starts after expiry
+
+
 def test_sign_in_discards_the_pre_login_session(tmp_path):
     app = secure_app(tmp_path)
     client = app.test_client()
