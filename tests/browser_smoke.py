@@ -71,6 +71,18 @@ with sync_playwright() as p:
     expect(page.locator("#notice")).to_have_text("Session label saved.")
     expect(page.locator(".label-box .section-label")).to_contain_text("benign")
     expect(page.locator("#label-saved")).to_contain_text("Saved as benign")  # visible confirmation inside the dialog
+    save = page.locator('#label-form button[type="submit"]')
+    expect(save).to_be_disabled()
+    expect(save).to_have_text("Saved ✓")  # nothing to save twice
+    page.locator('#label-form input[value="anomaly"]').check()
+    expect(save).to_have_text("Save changes")
+    expect(page.locator("#label-saved")).to_contain_text("Unsaved changes")
+    page.locator('#label-form input[value="anomaly"]').uncheck()
+    expect(save).to_be_disabled()  # back to the saved state
+    page.once("dialog", lambda dialog: dialog.dismiss())  # flipping benign -> malicious asks first; dismiss keeps it
+    page.locator('#label-form input[value="malicious"]').check()
+    save.click()
+    expect(page.locator(".label-box .section-label")).to_contain_text("benign")
     page.locator("#close-session").click()
     page.locator("#clear-filters").click()
     page.locator('[data-view="findings"]').click()

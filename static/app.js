@@ -308,12 +308,40 @@ async function openSession(session, sensor) {
       ${e.input || e.url || e.username || e.client_version || e.signature ? `<code>${esc(e.input || e.url || (e.username ? `User: ${e.username}` : e.signature ? `Signature ${e.signature_id}: ${e.signature}` : e.client_version))}</code>` : ''}
       <span class="evidence-id">${esc(e.id)}</span></div></article>`).join('')}</div>`;
   visibleEvents = [...visibleEvents.filter(v => !t.events.some(e => e.id === v.id)), ...t.events];
+  currentSession.saved = label ? {label: label.label, types: [...label.types].sort(), note: label.note || ''} : null;
+  updateLabelButton();
+}
+
+function labelFormValue() {
+  const form = $('#label-form');
+  return {label: form.querySelector('input[name="label"]:checked')?.value || null,
+          types: [...form.querySelectorAll('input[name="types"]:checked')].map(i => i.value).sort(), note: form.note.value.trim()};
+}
+
+// Saved and unchanged: nothing to save. Any edit turns the button back on and says so.
+function updateLabelButton() {
+  const form = $('#label-form');
+  if (!form || !currentSession) return;
+  const saved = currentSession.saved, now = labelFormValue();
+  const unchanged = saved && JSON.stringify(saved) === JSON.stringify(now);
+  const button = form.querySelector('button[type="submit"]'), status = $('#label-saved');
+  button.disabled = Boolean(unchanged);
+  button.textContent = unchanged ? 'Saved ✓' : saved ? 'Save changes' : 'Save label';
+  if (saved && !unchanged) {
+    status.className = 'label-saved is-dirty';
+    status.textContent = `Unsaved changes. Currently saved as ${saved.label}; click "Save changes" to update it.`;
+  } else if (saved) {
+    status.className = 'label-saved is-saved';
+  }
 }
 
 async function saveLabel(clear = false) {
   const form = $('#label-form');
   const label = clear ? null : form.querySelector('input[name="label"]:checked')?.value;
   if (!clear && !label) throw new Error('Choose malicious or benign first.');
+  const saved = currentSession.saved;
+  if (clear && saved && !confirm(`Clear the saved "${saved.label}" label for this session?`)) return;
+  if (!clear && saved && saved.label !== label && !confirm(`This session is saved as ${saved.label}. Change it to ${label}?`)) return;
   const types = [...form.querySelectorAll('input[name="types"]:checked')].map(i => i.value);
   const {session, sensor} = currentSession;
   await api(`/api/v1/sessions/${encodeURIComponent(session)}/label?${query()}${sensor ? `&sensor=${encodeURIComponent(sensor)}` : ''}`,
@@ -425,6 +453,8 @@ document.addEventListener('submit', async event => {
   if (event.target.id === 'label-form') { event.preventDefault(); try { await saveLabel(); } catch (error) { notify(error.message, true); } }
   if (event.target.id === 'event-filters') { event.preventDefault(); eventPage = 1; loadEvents().catch(e => notify(e.message, true)); }
 });
+document.addEventListener('input', event => { if (event.target.closest('#label-form')) updateLabelButton(); });
+document.addEventListener('change', event => { if (event.target.closest('#label-form')) updateLabelButton(); });
 document.addEventListener('reset', event => {
   if (event.target.id === 'event-filters') setTimeout(() => { eventPage = 1; loadEvents().catch(e => notify(e.message, true)); });
 });

@@ -1699,3 +1699,16 @@ dialog pre {
   color:#8a2f2f;
   font-size:12px
 }
+
+.label-saved.is-dirty {
+  background:#fbf3e4;
+  color:#6b5a3e;
+  border:1px solid #ecdcbf
+}
+#label-form button[type="submit"]:disabled {
+  opacity:1;
+  background:#edf6f1;
+  color:#32644f;
+  border-color:#cce1d5;
+  cursor:default
+}
