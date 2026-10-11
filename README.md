@@ -38,7 +38,9 @@ Replays are idempotent. Demo and imported telemetry have separate namespaces and
 ## Features shipped
 
 - Cowrie JSONL file import with atomic validation, a 2 MB / 5,000-line request limit, canonical timestamps, stable event IDs, and deduplication.
-- Local collector polling the shared Cowrie log, with restart-safe deduplication, inode/size-based rotation handling, and partial/oversized-line handling.
+- Live collector with a durable checkpoint (file identity + byte offset) committed in the same transaction as its events; it resumes after restart, drains rename-rotated files (and finds them again by inode after a restart), resets on truncation, waits for partial lines, quarantines malformed or oversized lines without storing their content, and backs off without advancing when storage is unavailable.
+- Hash-chained raw evidence: the original record bytes, a SHA-256 digest, and provenance (ingestion mode, source, file identity, record locator, parser and schema versions) for every live, uploaded, or synthetic record, with a verification endpoint. See the [evidence and retention policy](docs/EVIDENCE_POLICY.md).
+- Separate `demo`, `imported`, and `live` datasets; versioned schema migrations; liveness, readiness, and per-source health endpoints.
 - Four deterministic rules: repeated failures, login after failures, system discovery commands, and completed downloads.
 - Cross-session authentication correlation within a sensor/source/time window; incident grouping by dataset, sensor, source address, and session.
 - Incident queue with severity, workflow, and text filters; paginated event search; full event inspection; candidate ATT&CK mappings; and source-event timelines.
@@ -86,6 +88,9 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | `AEGIS_PORT` | HTTP port | `8000` |
 | `AEGIS_BIND` | HTTP listen address | `127.0.0.1` |
 | `AEGIS_COWRIE_LOG` | Local Cowrie JSONL file to follow | Disabled |
+| `AEGIS_SOURCE_ID` | Provenance name for the live collector | `cowrie-live` |
+
+Startup fails with a clear message if `AEGIS_COWRIE_LOG` points at Cowrie's diagnostic `cowrie.log`, at a directory, or into a missing directory, or if `AEGIS_SOURCE_ID` is not 1–64 lowercase letters, digits, `.`, `_`, or `-`. On SIGTERM (`docker stop`) the collector finishes its current batch before the process exits.
 | `AEGIS_OLLAMA_MODEL` | Installed local Ollama model name | Disabled |
 | `AEGIS_OLLAMA_URL` | Loopback Ollama HTTP address | `http://127.0.0.1:11434` |
 | `AEGIS_OLLAMA_TIMEOUT` | Ollama request timeout in seconds | `45` |
@@ -132,7 +137,7 @@ This is a single-user local lab using Flask's development server. It has no user
 
 Discovery parsing recognizes simple shell command positions and ignores quoted lookalikes and interactive stdin. It is intentionally not a full shell parser and will miss some wrappers, expansions, or obfuscation.
 
-Recorded input does not prove successful command execution. Downloads do not establish malware or C2. Discovery can be benign; rule severity is priority, not a probability. ATT&CK mappings are candidates for review. Deduplication can collapse otherwise identical records sharing a timestamp. Collector rotation supports rename/create or observed truncation; copy-truncate followed by rapid regrowth can evade a size-based reset.
+Recorded input does not prove successful command execution. Downloads do not establish malware or C2. Discovery can be benign; rule severity is priority, not a probability. ATT&CK mappings are candidates for review. Deduplication can collapse otherwise identical records sharing a timestamp. Collector rotation supports rename/create (lossless, including across restarts while the rotated file stays in the same directory) or observed truncation; copy-truncate followed by rapid regrowth can evade a size-based reset, and lines written just before a copy-truncate can be lost. The raw evidence table holds attempted passwords; protect the database file.
 
 For the current local-lab scope, the remaining validation work is independent labeled telemetry and real local-model testing. Multi-user deployment, additional sensors, adaptive deception, and malware analysis remain optional future projects rather than requirements for this release.
 
@@ -150,7 +155,7 @@ GET endpoints are available on the local dashboard. Mutations require the dashbo
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/health` | Service and database readiness; returns 503 on database failure |
-| `GET /api/overview?source=demo` | Dataset counts, incident queue, ruleset version, collector and storage status |
+| `GET /api/overview?source=demo` (`demo`, `imported`, or `live`) | Dataset counts, incident queue, ruleset version, collector and storage status |
 | `GET /api/events?source=imported&q=hostname&page=1&limit=50` | Stable timestamp/ID ordering; page size 1–500 |
 | `GET /api/incidents/<id>?source=demo` | Findings, linked events, and analyst activity |
 | `GET /api/incidents/<id>/report?source=demo` | Markdown report |
@@ -158,6 +163,15 @@ GET endpoints are available on the local dashboard. Mutations require the dashbo
 | `GET /api/evaluation` | Non-mutating synthetic regression evaluation |
 | `POST /api/replay` | Idempotent demo ingestion |
 | `POST /api/import` | Atomic multipart JSONL import (`file`) |
+| `GET /api/v1/health/live` | Process liveness |
+| `GET /api/v1/health/ready` | Database, schema version, and collector state; 503 when not ready |
+| `GET /api/v1/sources` | Per-source checkpoint, counters, last event, lag, and collector state |
+| `GET /api/v1/sources/<id>/health` | One source |
+| `GET /api/v1/sources/<id>/errors?limit=50` | Quarantined-line metadata (no content), limit 1–200 |
+| `GET /api/v1/metrics` | Prometheus text: per-source totals, collector counters, lag, batch latency, evidence count |
+| `GET /api/v1/evidence/verify` | Recompute raw-evidence digests and hash chain; returns head hash to anchor elsewhere |
+
+Every `/api/...` route is also available under `/api/v1/...`; the unversioned paths remain for compatibility.
 | `PATCH /api/incidents/<id>?source=demo` | Set workflow with JSON `status` |
 | `POST /api/incidents/<id>/notes?source=demo` | Append JSON `text`, 1–2,000 characters; 100 notes per case |
 

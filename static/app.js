@@ -69,7 +69,7 @@ async function load({background = false} = {}) {
     $('#nav-count').textContent = data.incidents.length;
     $('#incident-count').textContent = data.incidents.length;
     $('#collector-status').textContent = data.collector;
-    $('#storage-status').textContent = `${data.storage.events.toLocaleString()} / ${data.storage.limit.toLocaleString()} events across both datasets`;
+    $('#storage-status').textContent = `${data.storage.events.toLocaleString()} / ${data.storage.limit.toLocaleString()} events across all datasets`;
     $('#ai-status').textContent = data.ai_enabled ? 'Local model configured; drafts require review' : 'Not configured · rule-based reports available';
     $('#sync-status').textContent = `Updated ${fmtTime(new Date())} UTC`;
     renderActivity(data.timeline); renderRules(data.rules);
@@ -81,7 +81,9 @@ async function load({background = false} = {}) {
       currentIncident = null;
       $('#incident-detail').innerHTML = `<div class="empty"><span class="empty-symbol">◈</span>
         <h2>${source === 'demo' ? 'Your first investigation starts here' : 'No incidents in this dataset'}</h2>
-        <p>${source === 'demo' ? 'Replay the synthetic demo to explore detections and their evidence.' : 'Import a Cowrie log. Observations that do not meet a rule remain in the event explorer.'}</p>
+        <p>${{demo: 'Replay the synthetic demo to explore detections and their evidence.',
+              imported: 'Import a Cowrie log. Observations that do not meet a rule remain in the event explorer.',
+              live: 'No live observation has met a rule. Collector state is shown under Lab & validation; other observations remain in the event explorer.'}[source]}</p>
         ${source === 'demo' ? '<button class="button primary" id="empty-replay">Replay demo</button>' : ''}</div>`;
     }
     if (view === 'events' && !background) await loadEvents();
@@ -185,6 +187,10 @@ async function loadEvaluation() {
   $('#evaluation').innerHTML = `<div class="evaluation-grid">${[['True positives', r.sessions.true_positives], ['False positives', r.sessions.false_positives], ['False negatives', r.sessions.false_negatives], ['True negatives', r.sessions.true_negatives]]
     .map(([label, n]) => `<div><strong>${n}</strong>${label}</div>`).join('')}</div><p>${esc(r.scope)}</p>`;
   $('#check-summary').textContent = `${r.passed} / ${r.total} passed`;
+  const chain = await api('/api/v1/evidence/verify');
+  $('#chain-status').textContent = chain.valid
+    ? `Verified · ${chain.records.toLocaleString()} raw records${chain.purged ? ` (${chain.purged} purged by retention)` : ''}${chain.head_hash ? ` · head ${chain.head_hash.slice(0, 12)}…` : ''}`
+    : `Integrity failure at record ${chain.first_invalid_seq}: ${chain.reason}`;
   $('#check-results').innerHTML = r.checks.map(c => `<div class="check-row"><span class="check-icon ${c.passed ? 'pass' : 'fail'}">${c.passed ? '✓' : '×'}</span><span>${esc(c.name)}</span><span>${c.passed ? 'Passed' : 'Failed'}</span></div>`).join('');
 }
 
@@ -195,7 +201,11 @@ function syncSource() {
     b.classList.toggle('selected', b.dataset.source === source);
     b.setAttribute('aria-pressed', String(b.dataset.source === source));
   });
-  $('#dataset-note').textContent = source === 'demo' ? 'Synthetic observations. No attacks are executed.' : 'Imported Cowrie observations. Separate from demo data.';
+  $('#dataset-note').textContent = {
+    demo: 'Synthetic observations. No attacks are executed.',
+    imported: 'Uploaded historical Cowrie observations. Separate from demo and live data.',
+    live: 'Observations collected from the configured Cowrie sensor. Separate from uploads and demo data.'
+  }[source];
 }
 
 async function replay() {

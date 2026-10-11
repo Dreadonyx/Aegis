@@ -1,13 +1,17 @@
+import atexit
+import hashlib
 import hmac
 import ipaddress
 import json
 import os
 import secrets
+import signal
 import sqlite3
+import sys
 import threading
-import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -15,8 +19,9 @@ from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
-from aegis.engine import RULES, RULESET_VERSION, detect, normalize, report
+from aegis.engine import RULES, RULESET_VERSION, detect, report
 from aegis.evaluate import evaluate
+from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
 from aegis.store import Store
 
 ROOT = Path(__file__).resolve().parent
@@ -65,9 +70,15 @@ def create_app(database=None):
 
     def source_arg():
         source = request.args.get("source", "demo")
-        if source not in ("demo", "imported"):
-            raise ValueError("source must be demo or imported")
+        if source not in ("demo", "imported", "live"):
+            raise ValueError("source must be demo, imported, or live")
         return source
+
+    def collector_status():
+        collector = app.extensions.get("collector")
+        if not collector:
+            return "Not configured"
+        return f"{collector.status['state'].replace('_', ' ').capitalize()}: {collector.status['detail']}"
 
     def incidents(source, events=None):
         states = store.statuses()
@@ -103,7 +114,7 @@ def create_app(database=None):
             timeline=[{"time": k, "count": v} for k, v in timeline.items()][-40:],
             rules=RULES, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")),
             ruleset_version=RULESET_VERSION, storage=store.usage(),
-            collector=app.config.get("COLLECTOR_STATUS", "Not configured"))
+            collector=collector_status())
 
     @app.get("/api/events")
     def event_list():
@@ -127,10 +138,106 @@ def create_app(database=None):
     def evaluation():
         return jsonify(evaluate())
 
+    @app.get("/api/v1/health/live")
+    def live():
+        return jsonify(status="alive")
+
+    @app.get("/api/v1/health/ready")
+    def ready():
+        checks = {"database": "ok", "schema_version": store.schema_version()}
+        store.usage()
+        collector = app.extensions.get("collector")
+        if collector:
+            checks["collector"] = collector.status["state"]
+            if not collector.healthy():
+                return jsonify(status="not_ready", checks=checks), 503
+        return jsonify(status="ready", checks=checks)
+
+    def source_health(source):
+        collector = app.extensions.get("collector")
+        runtime = None
+        if collector and collector.source_id == source["source_id"]:
+            runtime = {k: collector.status[k] for k in ("state", "detail", "last_read_at", "last_error_at", "consecutive_failures", "worker_restarts")}
+            runtime["bytes_behind"] = collector.bytes_behind()
+        lag = None
+        if source["last_event_time"]:
+            lag = round((datetime.now(timezone.utc) - datetime.fromisoformat(source["last_event_time"])).total_seconds(), 3)
+        return {**source, "seconds_since_last_event": lag, "collector": runtime}
+
+    @app.get("/api/v1/sources")
+    def source_list():
+        return jsonify(sources=[source_health(s) for s in store.sources()])
+
+    @app.get("/api/v1/sources/<source_id>/health")
+    def source_detail(source_id):
+        source = store.source(source_id)
+        return jsonify(source_health(source)) if source else (jsonify(error="Source not found"), 404)
+
+    @app.get("/api/v1/sources/<source_id>/errors")
+    def source_errors(source_id):
+        try:
+            limit = int(request.args.get("limit", "50"))
+            if not 1 <= limit <= 200:
+                raise ValueError()
+        except ValueError:
+            raise ValueError("limit must be between 1 and 200") from None
+        return jsonify(errors=store.errors(source_id, limit))
+
+    @app.get("/api/v1/evidence/verify")
+    def verify_evidence():
+        return jsonify(store.verify_chain())
+
+    @app.get("/api/v1/metrics")
+    def metrics():
+        """Prometheus text exposition, built from durable source totals and live collector state."""
+        def label(value):
+            return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        def epoch(value):
+            return datetime.fromisoformat(value).timestamp() if value else None
+
+        lines = []
+
+        def metric(name, kind, help_text, samples):
+            lines.extend([f"# HELP {name} {help_text}", f"# TYPE {name} {kind}"])
+            for labels, value in samples:
+                if value is None:
+                    continue
+                rendered = ",".join(f'{k}="{label(v)}"' for k, v in labels.items())
+                lines.append(f"{name}{{{rendered}}} {value}" if rendered else f"{name} {value}")
+
+        sources = store.sources()
+        per = lambda key, f=lambda v: v: [({"source_id": s["source_id"], "mode": s["ingestion_mode"]}, f(s[key])) for s in sources]
+        metric("aegis_source_events_total", "counter", "New canonical events committed per source.", per("events_total"))
+        metric("aegis_source_duplicates_total", "counter", "Records skipped as already stored.", per("duplicates_total"))
+        metric("aegis_source_malformed_total", "counter", "Lines quarantined as malformed.", per("malformed_total"))
+        metric("aegis_source_rotations_total", "counter", "Log rotations followed.", per("rotations_total"))
+        metric("aegis_source_truncations_total", "counter", "Log truncations detected.", per("truncations_total"))
+        metric("aegis_source_last_event_timestamp_seconds", "gauge", "Newest Cowrie event time per source.", per("last_event_time", epoch))
+        metric("aegis_source_last_commit_timestamp_seconds", "gauge", "Last successful commit per source.", per("last_commit_at", epoch))
+        usage = store.usage()
+        metric("aegis_events_stored", "gauge", "Canonical events stored across datasets.", [({}, usage["events"])])
+        metric("aegis_events_limit", "gauge", "Configured canonical event cap.", [({}, usage["limit"])])
+        metric("aegis_raw_evidence_records", "gauge", "Hash-chained raw evidence records.", [({}, store.raw_count())])
+        collector = app.extensions.get("collector")
+        if collector:
+            c, who = collector.counters, {"source_id": collector.source_id}
+            metric("aegis_collector_up", "gauge", "1 when the collector is healthy.", [(who, int(collector.healthy()))])
+            metric("aegis_collector_lines_read_total", "counter", "Lines read since process start.", [(who, c["lines_read"])])
+            metric("aegis_collector_records_committed_total", "counter", "Records committed since process start.", [(who, c["records_committed"])])
+            metric("aegis_collector_lines_quarantined_total", "counter", "Lines quarantined since process start.", [(who, c["lines_quarantined"])])
+            metric("aegis_collector_batches_total", "counter", "Batches committed since process start.", [(who, c["batches_committed"])])
+            metric("aegis_collector_last_batch_seconds", "gauge", "Read-to-commit time of the last batch.", [(who, c["last_batch_seconds"])])
+            metric("aegis_collector_bytes_behind", "gauge", "Unread bytes in the current log file.", [(who, collector.bytes_behind())])
+            metric("aegis_collector_consecutive_failures", "gauge", "Consecutive failed polls.", [(who, collector.status["consecutive_failures"])])
+            metric("aegis_collector_worker_restarts_total", "counter", "Collector recoveries from unexpected errors.", [(who, collector.status["worker_restarts"])])
+        return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
+
     @app.post("/api/replay")
     def replay():
-        events = [normalize(r, "demo") for r in demo_records()]
-        added = store.ingest(events)
+        records = [make_record(json.dumps(r).encode(), "demo", f"demo:{n}") for n, r in enumerate(demo_records(), 1)]
+        events = [r["event"] for r in records]
+        added = store.commit(records, dict(mode="synthetic", source_id="demo-replay", source_type="cowrie"))["inserted"]
         predicted = {i["session"] for i in detect(events)}
         tp = len(predicted & EXPECTED_POSITIVE)
         fp = len(predicted & EXPECTED_NEGATIVE)
@@ -145,24 +252,28 @@ def create_app(database=None):
         uploaded = request.files.get("file")
         if not uploaded:
             raise ValueError("Choose a Cowrie JSONL file")
+        content = uploaded.read()
         try:
-            lines = uploaded.read().decode("utf-8-sig").splitlines()
+            lines = content.decode("utf-8-sig").splitlines()
         except UnicodeDecodeError:
             raise ValueError("The file must be UTF-8 JSONL") from None
         if len(lines) > 5000:
             raise ValueError("Import up to 5,000 lines at a time")
-        events = []
+        # Atomic by design: any invalid line rejects the whole upload so the analyst can fix the file.
+        # The live collector instead quarantines bad lines and continues.
+        records = []
         for n, line in enumerate(lines, 1):
             if not line.strip():
                 continue
             try:
-                events.append(normalize(json.loads(line), "imported"))
+                records.append(make_record(line.encode(), "imported", f"line:{n}"))
             except (ValueError, RecursionError) as error:
                 raise ValueError(f"Line {n}: invalid Cowrie record. {str(error)[:200]}") from None
-        if not events:
+        if not records:
             raise ValueError("The file contains no events")
-        count = store.ingest(events)
-        return jsonify(inserted=count, duplicates=len(events)-count)
+        result = store.commit(records, dict(mode="import", source_id="upload", source_type="cowrie",
+                                            file_id="upload:" + hashlib.sha256(content).hexdigest()[:16]))
+        return jsonify(inserted=result["inserted"], duplicates=result["duplicates"])
 
     @app.get("/api/incidents/<incident_id>")
     def detail(incident_id):
@@ -241,6 +352,11 @@ def create_app(database=None):
         finally:
             ai_lock.release()
 
+    # Versioned aliases keep existing /api routes working while clients move to /api/v1.
+    for rule in list(app.url_map.iter_rules()):
+        if rule.rule.startswith("/api/") and not rule.rule.startswith("/api/v1/"):
+            app.add_url_rule("/api/v1/" + rule.rule[5:], endpoint=rule.endpoint,
+                             view_func=app.view_functions[rule.endpoint], methods=rule.methods - {"HEAD", "OPTIONS"})
     return app
 
 
@@ -249,56 +365,23 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def read_log_batch(path, offset=0, discarding=False):
-    batch, rejected = [], 0
-    with open(path, "rb") as stream:
-        stream.seek(offset)
-        for _ in range(500):
-            line = stream.readline(65537)
-            if not line:
-                break
-            if discarding:
-                offset = stream.tell()
-                discarding = not line.endswith(b"\n")
-                continue
-            if len(line) > 65536:
-                offset = stream.tell()
-                discarding = not line.endswith(b"\n")
-                rejected += 1
-                continue
-            if not line.endswith(b"\n"):
-                break
-            offset = stream.tell()
-            try:
-                batch.append(normalize(json.loads(line), "imported"))
-            except (ValueError, RecursionError):
-                rejected += 1
-    return batch, offset, discarding, rejected
-
-
-def follow_log(app, path):
-    """Poll JSONL; event hashes make rereads safe across restarts and rotation."""
-    def worker():
-        identity, offset, discarding = None, 0, False
-        while True:
-            try:
-                info = os.stat(path)
-                current = (info.st_dev, info.st_ino)
-                if current != identity or info.st_size < offset:
-                    identity, offset, discarding = current, 0, False
-                batch, next_offset, next_discarding, rejected = read_log_batch(path, offset, discarding)
-                if batch:
-                    app.extensions["store"].ingest(batch)
-                offset, discarding = next_offset, next_discarding
-                app.config["COLLECTOR_STATUS"] = f"Watching Cowrie log; last poll skipped {rejected} unsupported records"
-            except (OSError, ValueError, sqlite3.Error):
-                app.config["COLLECTOR_STATUS"] = "Waiting for a readable Cowrie log or available storage"
-            time.sleep(2)
-    threading.Thread(target=worker, daemon=True).start()
+def follow_log(app, path, source_id=None):
+    """Start the live collector; its state is reported by /api/v1/health/ready and /api/v1/sources."""
+    source_id = source_id or os.environ.get("AEGIS_SOURCE_ID", "cowrie-live")
+    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id)
+    app.extensions["collector"] = collector.start()
+    atexit.register(collector.stop)
+    return collector
 
 
 if __name__ == "__main__":
+    # docker stop sends SIGTERM; exiting through SystemExit runs atexit, so the collector
+    # finishes its current batch instead of being killed mid-poll.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     app = create_app()
     if os.environ.get("AEGIS_COWRIE_LOG"):
-        follow_log(app, os.environ["AEGIS_COWRIE_LOG"])
+        try:
+            follow_log(app, os.environ["AEGIS_COWRIE_LOG"])
+        except ValueError as error:
+            sys.exit(f"Aegis configuration error: {error}")
     app.run(host=os.environ.get("AEGIS_BIND", "127.0.0.1"), port=int(os.environ.get("AEGIS_PORT", "8000")), debug=False)
