@@ -2,7 +2,7 @@
 
 **An evidence-first SOC and deception lab.** Import or collect Cowrie telemetry, inspect explainable detections, follow incident timelines, and export analyst reports.
 
-This is a working local v0.2, with a real Cowrie sensor and a separate synthetic demo. It is intended for learning, defensive research, and repeatable portfolio demonstrations.
+This is Aegis 2.0, in development on `main`. It is not production-ready: open release gates are tracked in the [2.0 audit](docs/AEGIS_2_0_REPO_AUDIT.md#7-release-gate-status-snapshot-spec-17). The 1.0 lab, including the AWS honeypot deployment, is preserved on the `aegis-1.0` branch. Aegis runs a real Cowrie sensor with a separate synthetic demo and is intended for learning, defensive research, and repeatable portfolio demonstrations.
 
 ![Aegis investigation workspace](docs/screenshots/workspace.png)
 
