@@ -19,21 +19,29 @@ from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
-from aegis.engine import RULES, RULESET_VERSION, detect, report
+from aegis.analysis import Analyzer, load_config
+from aegis.engine import RULESET_VERSION, detect, report
 from aegis.evaluate import evaluate
 from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
-from aegis.store import Store
+from aegis.store import TRANSITIONS, Store, TransitionError
 
 ROOT = Path(__file__).resolve().parent
 
 
-def create_app(database=None):
+DATASET_LABELS = {"demo": "synthetic replay; not observed attacks", "imported": "uploaded historical telemetry",
+                  "live": "collected from the configured Cowrie sensor"}
+
+
+def create_app(database=None, detection_config=None):
     app = Flask(__name__)
     app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=2 * 1024 * 1024,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
                       TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
     store = Store(database or os.environ.get("AEGIS_DB", ROOT / "data/aegis.sqlite3"))
     app.extensions["store"] = store
+    analyzer = Analyzer(store, detection_config if detection_config is not None else load_config())
+    app.extensions["analyzer"] = analyzer
+    analyzer.refresh()  # recompute stored detections when rules or settings changed
     ai_lock = threading.Lock()
 
     @app.before_request
@@ -59,6 +67,10 @@ def create_app(database=None):
     def http_error(error):
         return jsonify(error=error.description), error.code
 
+    @app.errorhandler(TransitionError)
+    def conflict(error):
+        return jsonify(error=str(error)), 409
+
     @app.errorhandler(ValueError)
     def invalid(error):
         return jsonify(error=str(error)), 400
@@ -80,15 +92,48 @@ def create_app(database=None):
             return "Not configured"
         return f"{collector.status['state'].replace('_', ' ').capitalize()}: {collector.status['detail']}"
 
-    def incidents(source, events=None):
-        states = store.statuses()
-        return [{**i, "status": states.get(i["id"], "open")} for i in detect(events if events is not None else store.events(source))]
-
     def incident_by_id(incident_id):
-        incident = next((i for i in incidents(source_arg()) if i["id"] == incident_id), None)
-        if incident:
-            incident["activity"] = store.activity(incident_id)
-        return incident
+        dataset = source_arg()
+        analyzer.ensure_current(dataset)
+        return store.incident(dataset, incident_id)
+
+    def paging(default=50, maximum=500):
+        try:
+            page = int(request.args.get("page", "1"))
+            limit = int(request.args.get("limit", str(default)))
+            if page < 1 or not 1 <= limit <= maximum:
+                raise ValueError()
+        except ValueError:
+            raise ValueError(f"page must be positive and limit must be between 1 and {maximum}") from None
+        return page, limit, (page - 1) * limit
+
+    def text_args(*names, limit=200):
+        values = {}
+        for name in names:
+            value = request.args.get(name, "")
+            if len(value) > limit:
+                raise ValueError(f"{name} must be at most {limit} characters")
+            if value:
+                values[name] = value
+        return values
+
+    def time_arg(name):
+        value = request.args.get(name)
+        if not value:
+            return None
+        try:
+            when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                raise ValueError()
+        except ValueError:
+            raise ValueError(f"{name} must be an ISO 8601 time with a timezone") from None
+        return when.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+    def page_result(key, total, items, page, limit):
+        return jsonify({key: items, "total": total, "page": page, "limit": limit, "pages": max(1, (total + limit - 1) // limit)})
+
+    def summary(incident):
+        return {k: v for k, v in incident.items() if k not in ("event_refs", "session_keys", "events")}
 
     @app.get("/")
     def index():
@@ -102,37 +147,63 @@ def create_app(database=None):
     @app.get("/api/overview")
     def overview():
         source = source_arg()
-        events = store.events(source)
-        found = incidents(source, events)
-        timeline = {}
-        for e in sorted(events, key=lambda e: e["timestamp"]):
-            minute = e["timestamp"][:16]
-            timeline[minute] = timeline.get(minute, 0) + 1
-        return jsonify(events=len(events), incidents=[{k: v for k, v in i.items() if k != "events"} for i in found],
-            sources=len({e["src_ip"] for e in events}), sensors=len({e["sensor"] for e in events}),
-            open_incidents=sum(i["status"] != "resolved" for i in found),
-            timeline=[{"time": k, "count": v} for k, v in timeline.items()][-40:],
-            rules=RULES, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")),
-            ruleset_version=RULESET_VERSION, storage=store.usage(),
+        analyzer.ensure_current(source)
+        stats = store.overview(source)
+        _, found = store.incidents(source)
+        return jsonify(events=stats["events"], incidents=[summary(i) for i in found], sources=stats["sources"], sensors=stats["sensors"],
+            open_incidents=sum(i["status"] in ("open", "investigating") for i in found), timeline=stats["timeline"],
+            rules=analyzer.catalog, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")), ruleset_version=RULESET_VERSION,
+            dataset_label=DATASET_LABELS[source], detection=store.detection_state(source), storage=store.usage(),
             collector=collector_status())
 
     @app.get("/api/events")
     def event_list():
-        events = sorted(store.events(source_arg()), key=lambda e: (e["timestamp"], e["id"]), reverse=True)
-        query = request.args.get("q", "").casefold()
+        source = source_arg()
+        query = request.args.get("q", "")
         if len(query) > 200:
             raise ValueError("Search text must be at most 200 characters")
-        try:
-            page = int(request.args.get("page", "1"))
-            limit = int(request.args.get("limit", "50"))
-            if page < 1 or not 1 <= limit <= 500:
-                raise ValueError()
-        except ValueError:
-            raise ValueError("page must be positive and limit must be between 1 and 500") from None
-        events = [e for e in events if query in json.dumps(e).casefold()]
-        start = (page - 1) * limit
-        return jsonify(total=len(events), events=events[start:start+limit], limit=limit, page=page,
-                       pages=max(1, (len(events)+limit-1)//limit))
+        filters = text_args("event_type", "eventid", "session", "sensor", "src_ip")
+        filters.update(since=time_arg("since"), until=time_arg("until"))
+        page, limit, offset = paging()
+        total, events = store.query_events(source, query, filters, limit, offset)
+        return page_result("events", total, events, page, limit)
+
+    @app.get("/api/v1/incidents")
+    def incident_list():
+        source = source_arg()
+        filters = text_args("status", "severity")
+        if filters.get("status") and filters["status"] not in TRANSITIONS:
+            raise ValueError(f"status must be one of: {', '.join(TRANSITIONS)}")
+        page, limit, offset = paging(25, 200)
+        analyzer.ensure_current(source)
+        total, found = store.incidents(source, filters.get("status"), filters.get("severity"), limit, offset)
+        return page_result("incidents", total, [summary(i) for i in found], page, limit)
+
+    @app.get("/api/v1/findings")
+    def finding_list():
+        source = source_arg()
+        filters = text_args("engine", "rule_id", "severity", "status", "incident_id")
+        filters.setdefault("status", "active")
+        page, limit, offset = paging(50, 200)
+        analyzer.ensure_current(source)
+        total, found = store.findings(source, filters, limit, offset)
+        return page_result("findings", total, found, page, limit)
+
+    @app.get("/api/v1/sessions/<session_id>/timeline")
+    def session_timeline(session_id):
+        if len(session_id) > 200:
+            raise ValueError("session must be at most 200 characters")
+        source = source_arg()
+        analyzer.ensure_current(source)
+        result = store.session_timeline(source, session_id, text_args("sensor").get("sensor"))
+        if not result["events"]:
+            return jsonify(error="Session not found"), 404
+        return jsonify(session=session_id, dataset=source, **result)
+
+    @app.get("/api/v1/detection")
+    def detection_settings():
+        return jsonify(config=analyzer.config, fingerprint=analyzer.fingerprint, ruleset_version=RULESET_VERSION,
+                       catalog=analyzer.catalog, state={d: store.detection_state(d) for d in ("demo", "imported", "live")})
 
     @app.get("/api/evaluation")
     def evaluation():
@@ -238,7 +309,9 @@ def create_app(database=None):
         records = [make_record(json.dumps(r).encode(), "demo", f"demo:{n}") for n, r in enumerate(demo_records(), 1)]
         events = [r["event"] for r in records]
         added = store.commit(records, dict(mode="synthetic", source_id="demo-replay", source_type="cowrie"))["inserted"]
-        predicted = {i["session"] for i in detect(events)}
+        analyzer.after_commit(records)
+        sessions = {e["id"]: e["session"] for e in events}
+        predicted = {sessions[i] for incident in detect(events) for f in incident["findings"] for i in f["evidence_ids"]}
         tp = len(predicted & EXPECTED_POSITIVE)
         fp = len(predicted & EXPECTED_NEGATIVE)
         fn = len(EXPECTED_POSITIVE - predicted)
@@ -273,6 +346,7 @@ def create_app(database=None):
             raise ValueError("The file contains no events")
         result = store.commit(records, dict(mode="import", source_id="upload", source_type="cowrie",
                                             file_id="upload:" + hashlib.sha256(content).hexdigest()[:16]))
+        analyzer.after_commit(records)
         return jsonify(inserted=result["inserted"], duplicates=result["duplicates"])
 
     @app.get("/api/incidents/<incident_id>")
@@ -282,31 +356,38 @@ def create_app(database=None):
 
     @app.patch("/api/incidents/<incident_id>")
     def update(incident_id):
-        if not incident_by_id(incident_id):
+        incident = incident_by_id(incident_id)
+        if not incident:
             return jsonify(error="Incident not found"), 404
-        body = request.get_json()
-        if not isinstance(body, dict) or body.get("status") not in ("open", "investigating", "resolved"):
-            raise ValueError("Choose open, investigating, or resolved")
-        store.set_status(incident_id, body["status"])
-        return jsonify(status=body["status"])
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get("status") not in TRANSITIONS:
+            raise ValueError("Choose open, investigating, resolved, or false_positive")
+        store.set_status(incident["id"], body["status"])
+        return jsonify(status=body["status"], incident_id=incident["id"])
 
     @app.post("/api/incidents/<incident_id>/notes")
     def add_note(incident_id):
-        if not incident_by_id(incident_id):
+        incident = incident_by_id(incident_id)
+        if not incident:
             return jsonify(error="Incident not found"), 404
-        body = request.get_json()
+        body = request.get_json(silent=True)
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
             raise ValueError("Write a note between 1 and 2,000 characters")
-        store.add_note(incident_id, text.strip())
-        return jsonify(activity=store.activity(incident_id)), 201
+        store.add_note(incident["id"], text.strip())
+        return jsonify(activity=store.activity(incident["id"])), 201
 
     @app.get("/api/incidents/<incident_id>/evidence")
     def evidence_export(incident_id):
         incident = incident_by_id(incident_id)
         if not incident:
             return jsonify(error="Incident not found"), 404
-        return Response(json.dumps({"schema_version": 1, "incident": incident}, indent=2), mimetype="application/json",
+        bundle = {"schema_version": 2, "generated_at": datetime.now(timezone.utc).isoformat(), "dataset": incident["source"],
+                  "dataset_label": DATASET_LABELS[incident["source"]], "synthetic": incident["source"] == "demo",
+                  "detection": {"ruleset_version": RULESET_VERSION, "fingerprint": analyzer.fingerprint, "config": analyzer.config},
+                  "incident": incident, "provenance": store.provenance(e["id"] for e in incident["events"]),
+                  "evidence_chain": {**store.chain_head(), "note": "Head at export time, not verified here. Verify with /api/v1/evidence/verify and keep a copy elsewhere."}}
+        return Response(json.dumps(bundle, indent=2), mimetype="application/json",
                         headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}-evidence.json"'})
 
     @app.get("/api/incidents/<incident_id>/report")
@@ -314,7 +395,7 @@ def create_app(database=None):
         incident = incident_by_id(incident_id)
         if not incident:
             return jsonify(error="Incident not found"), 404
-        return Response(report(incident), mimetype="text/plain", headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}.md"'})
+        return Response(report(incident, store.provenance(e["id"] for e in incident["events"])), mimetype="text/plain", headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}.md"'})
 
     @app.post("/api/incidents/<incident_id>/ai")
     def ai_report(incident_id):
@@ -368,7 +449,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def follow_log(app, path, source_id=None):
     """Start the live collector; its state is reported by /api/v1/health/ready and /api/v1/sources."""
     source_id = source_id or os.environ.get("AEGIS_SOURCE_ID", "cowrie-live")
-    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id)
+    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id, on_commit=app.extensions["analyzer"].after_commit)
     app.extensions["collector"] = collector.start()
     atexit.register(collector.stop)
     return collector

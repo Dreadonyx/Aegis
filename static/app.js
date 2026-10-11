@@ -1,5 +1,9 @@
 const $ = selector => document.querySelector(selector);
-const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Telemetry is attacker-controlled: show control, bidirectional, and zero-width characters as visible escapes.
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
+const visible = value => String(value ?? '').replace(CONTROL, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+const esc = value => visible(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const statusLabel = s => ({false_positive: 'False positive'})[s] || s[0].toUpperCase() + s.slice(1);
 const fmtTime = t => new Date(t).toISOString().slice(11, 19);
 const fmtDate = t => new Date(t).toISOString().slice(0, 10);
 const names = {
@@ -66,6 +70,7 @@ async function load({background = false} = {}) {
     $('#metric-events').textContent = data.events.toLocaleString();
     $('#metric-open').textContent = data.open_incidents;
     $('#metric-sources').textContent = data.sources;
+    $('#metric-rules').firstChild.nodeValue = `${data.rules.length} `;
     $('#nav-count').textContent = data.incidents.length;
     $('#incident-count').textContent = data.incidents.length;
     $('#collector-status').textContent = data.collector;
@@ -103,8 +108,8 @@ function renderActivity(timeline) {
 }
 
 function renderRules(rules) {
-  $('#rule-list').innerHTML = rules.map(r => `<article class="rule-row"><div class="rule-id">${esc(r.id)}</div>
-    <div><h3>${esc(r.name)}</h3><p>${esc(r.description)}</p>
+  $('#rule-list').innerHTML = rules.map(r => `<article class="rule-row"><div class="rule-id">${esc(r.id)}<small>${r.engine === 'sequence' ? 'Sequence' : 'Rule'} v${esc(r.version)}</small></div>
+    <div><h3>${esc(r.name)}</h3><p>${esc(r.description)}</p><p class="rule-rationale">Severity: ${esc(r.severity_rationale)}</p>
     ${r.technique ? `<a class="technique" href="https://attack.mitre.org/techniques/${esc(r.technique.replace('.', '/'))}/" target="_blank" rel="noreferrer">${esc(r.technique)} ↗</a>` : ''}
     </div>${severityPill(r.severity)}</article>`).join('');
 }
@@ -117,15 +122,15 @@ function renderQueue() {
   $('#incident-list').innerHTML = list.length ? list.map(i => `<button class="incident-item ${i.id === selected ? 'selected' : ''}"
     data-incident="${i.id}" aria-pressed="${i.id === selected}"><div class="incident-top">${severityPill(i.severity)}
     <span class="incident-time">${fmtTime(i.last_seen)} UTC</span></div><h3>${esc(i.title)}</h3>
-    <div class="incident-meta"><span>${esc(i.src_ip)}</span><span>${esc(i.sensor)}</span></div>
+    <div class="incident-meta"><span>${esc(i.src_ip)}</span><span>${esc(i.sensor)}</span>${i.sessions?.length > 1 ? `<span>${i.sessions.length} sessions</span>` : ''}</div>
     <div class="incident-bottom"><span>${i.findings.length} finding${i.findings.length === 1 ? '' : 's'}</span>
-    <span class="workflow-state ${esc(i.status)}">${i.status === 'resolved' ? '✓ ' : ''}${esc(i.status)}</span></div></button>`).join('')
+    <span class="workflow-state ${esc(i.status)}">${i.status === 'resolved' ? '✓ ' : ''}${esc(statusLabel(i.status))}</span></div></button>`).join('')
     : '<div class="empty compact"><h2>No matching incidents</h2><p>Replay the demo, import events, or adjust the filters.</p></div>';
 }
 
 function renderAnalystActivity(activity) {
   return activity.length ? activity.map(a => `<article class="analyst-entry ${esc(a.kind)}"><div>
-    <strong>${a.kind === 'note' ? 'Analyst note' : 'Status changed'}</strong>
+    <strong>${{note: 'Analyst note', status: 'Status changed', merge: 'Cases merged'}[a.kind] || esc(a.kind)}${a.actor ? ` · ${esc(a.actor)}` : ''}</strong>
     <time datetime="${esc(a.timestamp)}">${fmtDate(a.timestamp)} ${fmtTime(a.timestamp)} UTC</time></div><p>${esc(a.body)}</p></article>`).join('')
     : '<p class="muted activity-empty">No notes or status changes yet. Record what you checked and why.</p>';
 }
@@ -137,29 +142,33 @@ async function loadDetail(id) {
   currentIncident = incident;
   const duration = Math.max(0, Math.round((new Date(incident.last_seen) - new Date(incident.first_seen)) / 1000));
   $('#incident-detail').innerHTML = `<div class="detail-heading"><div class="eyeline">${severityPill(incident.severity)}
-    <span class="muted">${esc(incident.status)}</span><span class="case-id">Case ${esc(id.slice(0, 8))}</span></div>
+    <span class="muted">${esc(statusLabel(incident.status))}</span><span class="case-id">Case ${esc(id.slice(0, 8))}</span></div>
     <h2>${esc(incident.title)}</h2><div class="detail-meta"><span>Source <strong>${esc(incident.src_ip)}</strong></span>
     <span>Sensor <strong>${esc(incident.sensor)}</strong></span><span>${fmtDate(incident.last_seen)}</span></div>
-    <div class="case-summary"><span><strong>${incident.events.length}</strong> related events</span><span><strong>${duration}s</strong> observed span</span><span>Ruleset ${esc(incident.ruleset_version)}</span></div>
+    <div class="case-summary"><span><strong>${incident.events.length}</strong> related events</span>${incident.sessions?.length > 1 ? `<span><strong>${incident.sessions.length}</strong> sessions</span>` : ''}<span><strong>${duration}s</strong> observed span</span><span>Ruleset ${esc(incident.ruleset_version)}</span></div>
     <div class="detail-actions"><select id="incident-status" aria-label="Incident workflow status">
-    ${['open', 'investigating', 'resolved'].map(s => `<option value="${s}" ${incident.status === s ? 'selected' : ''}>${s[0].toUpperCase() + s.slice(1)}</option>`).join('')}</select>
+    ${['open', 'investigating', 'resolved', 'false_positive'].map(s => `<option value="${s}" ${incident.status === s ? 'selected' : ''}>${statusLabel(s)}</option>`).join('')}</select>
     <a class="button secondary" href="/api/incidents/${id}/report?${query()}">Export report ↓</a>
     <a class="button secondary" href="/api/incidents/${id}/evidence?${query()}">Evidence JSON ↓</a>
     <button class="button secondary" id="ai-report" ${overview.ai_enabled ? '' : 'disabled'} title="${overview.ai_enabled ? 'Summarize findings with your local model' : 'Configure a local Ollama model in the setup guide'}">Generate AI draft</button></div></div>
     <div class="detail-body"><h3 class="section-label">Why this was flagged <span>${incident.findings.length} finding${incident.findings.length === 1 ? '' : 's'}</span></h3>
-    ${incident.findings.map(f => `<article class="finding"><strong>${esc(f.name)}</strong><p>${esc(f.description)}</p>
+    ${incident.findings.map(f => `<article class="finding ${f.engine === 'sequence' ? 'sequence' : ''}"><strong>${esc(f.name)}</strong><p>${esc(f.description)}</p>
+    ${f.rationale ? `<p class="finding-why"><span>Why</span>${esc(f.rationale.explanation)}</p>` : ''}
     <div class="finding-links">${f.technique ? `<a class="technique" href="https://attack.mitre.org/techniques/${esc(f.technique.replace('.', '/'))}/" target="_blank" rel="noreferrer">${esc(f.technique)} ↗</a>` : ''}
-    <span class="technique">${esc(f.id)}</span><a class="evidence-link" href="#event-${f.evidence_ids[0]}">${f.evidence_ids.length} evidence event${f.evidence_ids.length === 1 ? '' : 's'}</a></div></article>`).join('')}
+    <span class="technique">${esc(f.id)} v${esc(f.rule_version)}</span><span class="technique">${f.engine === 'sequence' ? 'Sequence' : 'Rule'}</span>
+    <a class="evidence-link" href="#event-${esc(f.evidence_ids[0])}">${f.evidence_ids.length} evidence event${f.evidence_ids.length === 1 ? '' : 's'}</a></div>
+    ${f.rationale ? `<details class="facts"><summary>Facts behind this finding</summary><pre>${esc(JSON.stringify(f.rationale.facts, null, 2))}</pre></details>` : ''}</article>`).join('')}
+    ${(incident.correlation || []).filter(c => c.strength === 'weak').map(c => `<p class="correlation-note"><strong>Weak link.</strong> ${esc(c.explanation)}</p>`).join('')}
     <div id="ai-output"></div><h3 class="section-label timeline-title">Evidence timeline <span>${incident.events.length} related events</span></h3>
     <div class="timeline">${incident.events.map(e => `<article class="timeline-event" id="event-${e.id}"><time datetime="${esc(e.timestamp)}" title="${esc(e.timestamp)}">${fmtTime(e.timestamp)}</time><div>
       <button class="event-link" data-event="${e.id}">${esc(names[e.eventid] || e.eventid)}</button>
       ${e.input || e.url || e.username ? `<code>${esc(e.input || e.url || `User: ${e.username}`)}</code>` : ''}
-      <span class="evidence-id">${esc(e.id)} · ${esc(e.session)}</span></div></article>`).join('')}</div>
+      <span class="evidence-id">${esc(e.id)} · ${esc(e.session)}${e.link === 'source_address' ? ' <span class="link-tag">other session · address-linked</span>' : e.link === 'finding_session' ? ' <span class="link-tag">other session</span>' : ''}</span></div></article>`).join('')}</div>
     <section class="analyst-section"><h3 class="section-label">Analyst notebook <span>Saved with this incident</span></h3>
       <form id="note-form"><label for="note-text">Investigation note</label><textarea id="note-text" rows="3" maxlength="2000" required placeholder="What did you check? What explains this activity?">${esc(drafts.get(id) || '')}</textarea>
       <div class="note-actions"><small id="note-hint">${drafts.get(id) ? 'Unsaved draft' : 'Up to 2,000 characters. Notes are append-only.'}</small><button class="button primary" type="submit">Save note</button></div></form>
       <div id="analyst-activity">${renderAnalystActivity(incident.activity)}</div></section>
-    <div class="report-note">${source === 'demo' ? 'Synthetic demo observations. ' : ''}Findings come from deterministic rules. Review session context before escalating.</div></div>`;
+    <div class="report-note">${source === 'demo' ? 'Synthetic demo observations, not observed attacks. ' : ''}Findings come from deterministic rules and sequences. Address-linked sessions may belong to different clients. Review session context before escalating.</div></div>`;
   if (aiDrafts.has(id)) renderAI(aiDrafts.get(id));
 }
 
@@ -229,7 +238,7 @@ document.addEventListener('click', async event => {
     if (target.dataset.incident) { selected = target.dataset.incident; renderQueue(); await loadDetail(selected); }
     if (target.dataset.event) {
       const record = [...visibleEvents, ...(currentIncident?.events || [])].find(e => e.id === target.dataset.event);
-      if (record) { $('#event-json').textContent = JSON.stringify(record, null, 2); $('#event-dialog').showModal(); }
+      if (record) { $('#event-json').textContent = visible(JSON.stringify(record, null, 2)); $('#event-dialog').showModal(); }
     }
     if (target.id === 'close-event') $('#event-dialog').close();
     if (['replay', 'empty-replay', 'validate'].includes(target.id)) await replay();

@@ -9,7 +9,9 @@ import pytest
 from app import create_app
 from aegis.demo import demo_records
 from aegis.ingestion import Collector, make_record
-from aegis.store import Store
+from aegis.store import MIGRATIONS, Store
+
+LATEST = MIGRATIONS[-1][0]
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -89,11 +91,11 @@ def test_migrations_upgrade_a_v02_database(tmp_path):
             CREATE TABLE activity(id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id TEXT NOT NULL, timestamp TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL);
             INSERT INTO events VALUES ('legacy', 'imported', '{"id":"legacy","source":"imported"}');""")
     store = Store(path)
-    assert store.schema_version() == 2
+    assert store.schema_version() == LATEST
     assert store.events("imported") == [{"id": "legacy", "source": "imported"}]
     Store(path)  # reopening applies nothing twice
     with sqlite3.connect(path) as db:
-        assert db.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == LATEST
 
 
 # --- Live collector -------------------------------------------------------------------------
@@ -289,7 +291,7 @@ def test_live_dataset_is_separate(client, tmp_path):
 
 def test_readiness_reflects_collector_and_database(client, tmp_path, monkeypatch):
     assert client.get("/api/v1/health/live").status_code == 200
-    assert client.get("/api/v1/health/ready").get_json()["checks"]["schema_version"] == 2
+    assert client.get("/api/v1/health/ready").get_json()["checks"]["schema_version"] == LATEST
     collector = Collector(client.application.extensions["store"], tmp_path / "cowrie.json")
     client.application.extensions["collector"] = collector
     collector.status["state"] = "storage_unavailable"

@@ -1360,3 +1360,64 @@ dialog pre {
     padding:9px 10px
   }
 }
+
+.workflow-state.false_positive {
+  background:#f4f1ec;
+  color:#6b5a3e;
+  border-color:#e2d8c6
+}
+.finding.sequence {
+  border-left-color:#7f6bb0
+}
+.finding-why {
+  color:#34495a
+}
+.finding-why span {
+  font-weight:600;
+  margin-right:6px
+}
+.facts {
+  margin-top:8px;
+  font-size:10px
+}
+.facts summary {
+  cursor:pointer;
+  color:#466f96
+}
+.facts pre {
+  white-space:pre-wrap;
+  word-break:break-word;
+  background:white;
+  border:1px solid var(--line);
+  border-radius:4px;
+  padding:8px;
+  margin-top:6px;
+  max-height:220px;
+  overflow:auto
+}
+.correlation-note {
+  font-size:11px;
+  line-height:1.6;
+  color:#6b5a3e;
+  background:#fbf7ef;
+  border-radius:5px;
+  padding:9px 12px;
+  margin:9px 0
+}
+.link-tag {
+  font-size:9px;
+  color:#6b5a3e;
+  background:#fbf3e4;
+  border-radius:3px;
+  padding:1px 5px
+}
+.rule-id small {
+  display:block;
+  font-size:9px;
+  color:var(--muted);
+  font-weight:400;
+  margin-top:3px
+}
+.rule-rationale {
+  color:var(--muted)
+}

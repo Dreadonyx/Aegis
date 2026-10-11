@@ -51,20 +51,21 @@ with sync_playwright() as p:
     page.locator("#event-search").fill("hostname")
     expect(page.locator("#event-rows tr")).to_have_count(1)
     page.locator('[data-view="rules"]').click()
-    expect(page.locator(".rule-row")).to_have_count(4)
+    expect(page.locator(".rule-row")).to_have_count(7)
     page.locator('[data-view="lab"]').click()
     page.locator("#validate").click()
     expect(page.locator(".evaluation-grid")).to_be_visible()
-    expect(page.locator("#check-summary")).to_have_text("10 / 10 passed")
-    expect(page.locator(".check-row")).to_have_count(10)
+    expect(page.locator("#check-summary")).to_have_text("20 / 20 passed")
+    expect(page.locator(".check-row")).to_have_count(20)
     expect(page.locator("#metric-events")).to_have_text("18")
     malicious_text = '<img src=x onerror="window.injected=true">'
-    record = dict(timestamp="2026-10-05T15:00:00Z", eventid="cowrie.command.input", session="browser-import", sensor="local", src_ip="192.0.2.88", input="hostname; "+malicious_text)
+    record = dict(timestamp="2026-10-05T15:00:00Z", eventid="cowrie.command.input", session="browser-import", sensor="local", src_ip="192.0.2.88", input="hostname; "+malicious_text+"\u202e\u001b[31m")
     page.locator("#file-input").set_input_files({"name":"sample.jsonl","mimeType":"application/json","buffer":json.dumps(record).encode()})
     expect(page.locator('[data-source="imported"]')).to_have_class("selected")
     page.locator('[data-view="incidents"]').click()
     expect(page.locator(".timeline-event code")).to_contain_text(malicious_text)
     assert page.evaluate("window.injected") is None
+    expect(page.locator(".timeline-event code")).to_contain_text("\\u202e\\u001b[31m")  # bidi override and ANSI escape shown, not applied
     page.locator('[data-source="demo"]').click()
     expect(page.locator(".incident-item")).to_have_count(3)
     page.locator("#workflow-filter").select_option("investigating")
@@ -75,4 +76,4 @@ with sync_playwright() as p:
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Mobile page overflows"
     assert not errors, errors
     browser.close()
-print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, 10 regression checks, import escaping, mobile layout.")
+print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, 20 regression checks, import and control-character escaping, mobile layout.")

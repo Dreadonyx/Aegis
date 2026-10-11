@@ -1,134 +1,67 @@
-"""Normalize untrusted Cowrie records and detect observable activity. Never execute input."""
-import hashlib
-import ipaddress
+"""Detection facade: canonical events -> rule and sequence findings -> fused incidents. Never execute input."""
 import json
-import re
-import shlex
-from datetime import datetime, timezone
 
-RULESET_VERSION = "2026.10.1"
+from aegis.canonical import normalize  # noqa: F401  (public API)
+from aegis.fusion import fuse
+from aegis.rules import (DEFAULT_CONFIG, RULESET_VERSION, catalog as rule_catalog, fingerprint, is_discovery,  # noqa: F401
+                         rule_findings, session_key, validate_config)
+from aegis.sequences import catalog as sequence_catalog, sequence_findings
 
-RULES = [
-    {"id": "AUTH-001", "name": "Repeated authentication failures", "severity": "medium", "technique": "T1110.001", "description": "Five failed logins from one source on one sensor within 60 seconds, across sessions."},
-    {"id": "AUTH-002", "name": "Login following repeated failures", "severity": "high", "technique": None, "description": "A honeypot login succeeds within five minutes after at least five failures from the same source and sensor. This does not establish a real account compromise."},
-    {"id": "DISC-001", "name": "System discovery command observed", "severity": "low", "technique": "T1082", "description": "Shell input contains uname or hostname as a command. Input is observed; execution success is not established."},
-    {"id": "XFER-001", "name": "File download recorded", "severity": "high", "technique": "T1105", "description": "Cowrie reports a completed file download. This does not establish payload execution or maliciousness."},
-]
-BY_ID = {r["id"]: r for r in RULES}
+DEFAULT = validate_config(DEFAULT_CONFIG)
 
 
-def normalize(raw, source):
-    if not isinstance(raw, dict):
-        raise ValueError("Each record must be a JSON object")
-    for key in ("timestamp", "eventid", "session", "sensor", "src_ip"):
-        if not isinstance(raw.get(key), str) or not raw[key].strip() or len(raw[key]) > 200:
-            raise ValueError(f"{key} must be a nonempty string of at most 200 characters")
-    try:
-        when = datetime.fromisoformat(raw["timestamp"].replace("Z", "+00:00"))
-        if when.tzinfo is None:
-            raise ValueError()
-        when = when.astimezone(timezone.utc)
-        ip = str(ipaddress.ip_address(raw["src_ip"]))
-    except (ValueError, OverflowError):
-        raise ValueError("timestamp must include a timezone and src_ip must be a valid IP") from None
-    if not raw["eventid"].startswith("cowrie."):
-        raise ValueError("Only Cowrie event IDs are supported")
-    # Allowlist: do not retain passwords, raw login messages, keys, or unknown fields.
-    data = {k: raw[k] for k in ("eventid", "session", "sensor")}
-    data.update(timestamp=when.isoformat(timespec="microseconds"), src_ip=ip, source=source)
-    for key in ("username", "input", "url", "shasum", "realm"):
-        if key in raw:
-            if not isinstance(raw[key], str) or len(raw[key]) > 4096:
-                raise ValueError(f"{key} must be a string of at most 4096 characters")
-            if key == "username" or (key in ("input", "realm") and raw["eventid"].startswith("cowrie.command.")) or (key in ("url", "shasum") and raw["eventid"] == "cowrie.session.file_download"):
-                data[key] = raw[key]
-    data["id"] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:20]
-    return data
+def catalog(config=DEFAULT):
+    return rule_catalog(config) + sequence_catalog(config)
 
 
-def session_key(event):
-    return hashlib.sha256(json.dumps([event[k] for k in ("source", "sensor", "src_ip", "session")]).encode()).hexdigest()[:16]
+RULES = catalog()
 
 
-def is_discovery(text):
-    """Recognize simple shell command positions without interpreting or executing input."""
-    lexer = shlex.shlex(text, posix=False, punctuation_chars=";&|()\n")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return False
-    command_position = True
-    for token in tokens:
-        if token and all(c in ";&|()\n" for c in token):
-            command_position = True
-        elif command_position:
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
-                continue
-            command_position = False
-            name = token.strip("\"'").rsplit("/", 1)[-1]
-            if name in ("uname", "hostname"):
-                return True
-    return False
+def detect(events, config=DEFAULT):
+    events = list(events)
+    return fuse(rule_findings(events, config) + sequence_findings(events, config), events, config)
 
 
-def detect(events):
-    failures, incidents = {}, {}
-    for event in sorted(events, key=lambda e: (e["timestamp"], e["id"])):
-        t = datetime.fromisoformat(event["timestamp"]).timestamp()
-        key = (event["source"], event["sensor"], event["src_ip"])
-        history = failures.setdefault(key, [])
-        history[:] = [(ts, e) for ts, e in history if t - ts <= 300]
-        matches = []
-        if event["eventid"] == "cowrie.login.failed":
-            history.append((t, event))
-            recent = [e for ts, e in history if t - ts <= 60]
-            if len(recent) >= 5:
-                matches.append(("AUTH-001", [e["id"] for e in recent]))
-        elif event["eventid"] == "cowrie.login.success" and len(history) >= 5:
-            matches.append(("AUTH-002", [e["id"] for _, e in history] + [event["id"]]))
-        elif event["eventid"] == "cowrie.command.input" and not event.get("realm") and is_discovery(event.get("input", "")):
-            matches.append(("DISC-001", [event["id"]]))
-        elif event["eventid"] == "cowrie.session.file_download":
-            matches.append(("XFER-001", [event["id"]]))
-        if not matches:
-            continue
-        sid = session_key(event)
-        incident = incidents.setdefault(sid, {"id": sid, "session": event["session"], "sensor": event["sensor"], "src_ip": event["src_ip"], "source": event["source"], "findings": {}, "last_seen": event["timestamp"]})
-        incident["last_seen"] = event["timestamp"]
-        for rule, ids in matches:
-            finding = incident["findings"].setdefault(rule, {**BY_ID[rule], "evidence_ids": []})
-            finding["evidence_ids"] = list(dict.fromkeys(finding["evidence_ids"] + ids))
-    rank = {"low": 1, "medium": 2, "high": 3}
-    by_session, by_id = {}, {e["id"]: e for e in events}
-    for event in events:
-        by_session.setdefault(session_key(event), []).append(event)
-    for incident in incidents.values():
-        incident["findings"] = list(incident["findings"].values())
-        incident["severity"] = max((f["severity"] for f in incident["findings"]), key=rank.get)
-        incident["title"] = max(incident["findings"], key=lambda f: rank[f["severity"]])["name"]
-        related = {i for f in incident["findings"] for i in f["evidence_ids"]}
-        related.update(e["id"] for e in by_session[incident["id"]])
-        incident["events"] = sorted((by_id[i] for i in related), key=lambda e: (e["timestamp"], e["id"]))
-        incident["first_seen"] = incident["events"][0]["timestamp"]
-        incident["last_seen"] = incident["events"][-1]["timestamp"]
-        incident["ruleset_version"] = RULESET_VERSION
-    return sorted(incidents.values(), key=lambda i: (rank[i["severity"]], i["last_seen"]), reverse=True)
+DATASET_LABELS = {"demo": "demo (synthetic replay; these are not observed attacks)",
+                  "imported": "imported (uploaded historical Cowrie telemetry)",
+                  "live": "live (collected from the configured Cowrie sensor)"}
+LINKS = {"anchor_session": "", "finding_session": " [other finding session]", "source_address": " [other session, address-linked]"}
 
 
-def report(incident):
-    lines = [f"# Aegis incident {incident['id']}", "", "Report source: deterministic detection rules (not AI)", f"Telemetry: {incident['source']}", f"Severity: {incident['severity']} | Workflow: {incident['status']}", f"Source: {incident['src_ip']} | Sensor: {incident['sensor']}", "", "## Findings"]
+def report(incident, provenance=None):
+    lines = [f"# Aegis incident {incident['id']}", "", "Report source: deterministic detection rules (not AI)",
+             f"Telemetry: {DATASET_LABELS.get(incident['source'], incident['source'])}",
+             f"Severity: {incident['severity']} | Workflow: {incident['status']}",
+             f"Source: {incident['src_ip']} | Sensor: {', '.join(incident.get('sensors') or [incident['sensor']])} | Sessions: {len(incident.get('sessions') or [incident['session']])}",
+             "", "## Findings"]
     for finding in incident["findings"]:
-        lines += [f"- {finding['id']}: {finding['name']}", f"  {finding['description']}", f"  Evidence: {', '.join(finding['evidence_ids'])}"]
+        lines += [f"- {finding['id']} v{finding.get('rule_version', '1')} ({finding.get('engine', 'rule')}): {finding['name']}",
+                  f"  {finding['description']}"]
+        if finding.get("rationale"):
+            lines.append(f"  Why: {finding['rationale']['explanation']}")
+        lines.append(f"  Evidence: {', '.join(finding['evidence_ids'])}")
         if finding["technique"]:
             lines.append(f"  Candidate ATT&CK mapping: {finding['technique']}")
+    if incident.get("correlation"):
+        lines += ["", "## Correlation"]
+        lines += [f"- {c['strength']}: {c['explanation']}" for c in incident["correlation"]]
     lines += ["", "## Evidence timeline"]
     for event in incident["events"]:
         detail = event.get("input", event.get("url", event.get("username", "")))
-        lines.append(f"- [{event['id']}] {event['timestamp']} {event['eventid']} {json.dumps(detail)}")
-    lines += ["", f"Ruleset: {RULESET_VERSION}", "", "## Analyst activity"]
+        lines.append(f"- [{event['id']}] {event['timestamp']} {event['eventid']} {json.dumps(detail)}{LINKS.get(event.get('link'), '')}")
+    if provenance is not None:
+        modes = sorted({f"{p['ingestion_mode']}:{p['source_id']} (parser {p['parser_version']})" for rows in provenance.values() for p in rows})
+        missing = sum(1 for e in incident["events"] if not provenance.get(e["id"]))
+        lines += ["", "## Provenance", f"Ingested from: {', '.join(modes) or 'no raw evidence records'}"]
+        if missing:
+            lines.append(f"{missing} event(s) predate raw evidence retention (schema 1) and have no raw record.")
+    lines += ["", f"Ruleset: {incident.get('ruleset_version', RULESET_VERSION)}", "", "## Analyst activity"]
     for item in reversed(incident.get("activity", [])):
-        lines.append(f"- {item['timestamp']} ({item['kind']}): {json.dumps(item['body'])}")
-    lines += ["", "## Investigation", "Review the cited events and session context. Compare with authorized lab activity before escalating.", "", "## Limits", "Honeypot observations do not prove production compromise. Command input does not prove successful execution. A file download does not prove malware or C2. Technique mappings are candidates for analyst review. Severity is rule priority, not a calibrated probability."]
+        lines.append(f"- {item['timestamp']} ({item['kind']}, {item.get('actor', 'local-analyst')}): {json.dumps(item['body'])}")
+    lines += ["", "## Investigation", "Review the cited events and session context. Compare with authorized lab activity before escalating.", "", "## Limits",
+              "Honeypot observations do not prove production compromise. Command input does not prove successful execution. A file download does not prove malware or C2. "
+              "Address-linked sessions may belong to different clients behind shared addresses. Technique mappings are candidates for analyst review. "
+              "Severity is rule priority, not a calibrated probability."]
+    if incident["source"] == "demo":
+        lines += ["", "This report describes synthetic replay data generated for demonstration. It contains no observed attacker activity."]
     return "\n".join(lines)

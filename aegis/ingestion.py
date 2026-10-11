@@ -106,8 +106,9 @@ class Collector:
     """Tail one Cowrie JSONL file. The checkpoint (file identity + byte offset) is committed in the
     same transaction as the events it covers, so a crash or storage failure rereads, never skips."""
 
-    def __init__(self, store, path, source_id="cowrie-live"):
+    def __init__(self, store, path, source_id="cowrie-live", on_commit=None):
         self.store, self.path, self.source_id = store, Path(path), source_id
+        self.on_commit = on_commit  # detection hook; it must handle its own failures
         self.stream = self.identity = None
         self.offset, self.discarding = 0, False
         self.pending = {"rotations": 0, "truncations": 0}
@@ -199,6 +200,11 @@ class Collector:
             self.counters["lines_quarantined"] += len(errors) - len(self.pending_errors)
             self.counters["batches_committed"] += 1
             self.counters["last_batch_seconds"] = round(time.monotonic() - started, 6)
+            if records and self.on_commit:
+                try:
+                    self.on_commit(records)
+                except Exception:  # detection never stalls collection; committed events stay committed
+                    log.exception("Post-commit detection failed")
         consumed = offset - self.offset
         self.offset, self.discarding = offset, discarding
         self.pending, self.pending_errors = {"rotations": 0, "truncations": 0}, []

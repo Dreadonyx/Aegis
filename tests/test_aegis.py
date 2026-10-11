@@ -26,10 +26,13 @@ def test_cross_session_detection_and_evidence():
     events = [event(n*5, session=f"s{n}") for n in range(5)]
     events.append(event(30, session="success", eventid="cowrie.login.success"))
     incidents = detect(list(reversed(events)))
-    success = next(i for i in incidents if i["session"] == "success")
-    assert success["findings"][0]["id"] == "AUTH-002"
+    # 2.0 fuses the burst (AUTH-001) and the login (AUTH-002) because they share evidence.
+    assert len(incidents) == 1
+    success = incidents[0]
+    login = next(f for f in success["findings"] if f["id"] == "AUTH-002")
     assert len(success["events"]) == 6
-    assert set(success["findings"][0]["evidence_ids"]) == {e["id"] for e in success["events"]}
+    assert set(login["evidence_ids"]) == {e["id"] for e in success["events"]}
+    assert any(c["strength"] == "weak" for c in success["correlation"])
 
 
 @pytest.mark.parametrize("field,other", [("sensor", "sensor-b"), ("src_ip", "192.0.2.2"), ("source", "demo")])
@@ -184,7 +187,8 @@ def test_notes_status_audit_and_evidence_export(client):
     assert detail["activity"][1]["body"] == "open → investigating"
     assert "Reviewed the demo fixture." in client.get(path + "/report").text
     bundle = client.get(path + "/evidence").get_json()
-    assert bundle["schema_version"] == 1
+    assert bundle["schema_version"] == 2 and bundle["synthetic"] is True
+    assert all(bundle["provenance"][e["id"]][0]["ingestion_mode"] == "synthetic" for e in bundle["incident"]["events"])
     assert bundle["incident"]["activity"] == detail["activity"]
     assert {e["id"] for e in bundle["incident"]["events"]} >= set(detail["findings"][0]["evidence_ids"])
     assert client.get(path + "?source=imported").status_code == 404
@@ -208,7 +212,7 @@ def test_paginated_search_has_no_missing_events(client):
 
 def test_evaluation_does_not_mutate_dataset(client):
     result = client.get("/api/evaluation").get_json()
-    assert result["passed"] == result["total"] == 10
+    assert result["passed"] == result["total"] == 20
     assert client.get("/api/overview").get_json()["events"] == 0
 
 

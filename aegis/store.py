@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
 
+from aegis.canonical import event_type
+
 EVENT_LIMIT = 50000
 ERROR_LIMIT = 1000  # quarantined lines retained per source; oldest are trimmed
 GENESIS = "0" * 64
@@ -67,6 +69,103 @@ MIGRATIONS = [
     ]),
 ]
 
+
+
+def _backfill_event_columns(db):
+    rows = db.execute("SELECT id, body FROM events").fetchall()
+    db.executemany("UPDATE events SET event_time=?, eventid=?, event_type=?, session=?, sensor=?, src_ip=? WHERE id=?",
+                   [event_columns(json.loads(body)) + (event_id,) for event_id, body in rows])
+
+
+def _backfill_status_values(db):
+    rows = db.execute("SELECT id, body FROM activity WHERE kind='status'").fetchall()
+    db.executemany("UPDATE activity SET before_value=?, after_value=? WHERE id=?",
+                   [tuple(body.split(" → ", 1)) + (row_id,) for row_id, body in rows if " → " in body])
+
+
+MIGRATIONS.append((3, "Indexed canonical event columns, persisted findings and incidents, audited workflow", [
+    *[f"ALTER TABLE events ADD COLUMN {column} TEXT" for column in ("event_time", "eventid", "event_type", "session", "sensor", "src_ip")],
+    _backfill_event_columns,
+    "CREATE INDEX events_time ON events(source, event_time, id)",
+    "CREATE INDEX events_session ON events(source, session)",
+    "CREATE INDEX events_src ON events(source, src_ip)",
+    "CREATE INDEX events_type ON events(source, event_type)",
+    "ALTER TABLE activity ADD COLUMN actor TEXT NOT NULL DEFAULT 'local-analyst'",
+    "ALTER TABLE activity ADD COLUMN before_value TEXT",
+    "ALTER TABLE activity ADD COLUMN after_value TEXT",
+    _backfill_status_values,
+    """CREATE TABLE findings(
+        finding_id TEXT PRIMARY KEY,
+        dataset TEXT NOT NULL,
+        incident_id TEXT,
+        engine TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        rule_version TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        src_ip TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('active', 'superseded')),
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""",
+    "CREATE INDEX findings_incident ON findings(dataset, incident_id)",
+    "CREATE INDEX findings_src ON findings(dataset, src_ip)",
+    "CREATE INDEX findings_status ON findings(dataset, status, observed_at)",
+    """CREATE TABLE incidents(
+        incident_id TEXT PRIMARY KEY,
+        dataset TEXT NOT NULL,
+        src_ip TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        severity_rank INTEGER NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        merged_into TEXT,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""",
+    "CREATE INDEX incidents_queue ON incidents(dataset, active, severity_rank, last_seen)",
+    "CREATE INDEX incidents_src ON incidents(dataset, src_ip)",
+    "CREATE INDEX incidents_merged ON incidents(merged_into)",
+    """CREATE TABLE detection_state(
+        dataset TEXT PRIMARY KEY,
+        fingerprint TEXT,
+        computed_at TEXT,
+        dirty INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT)""",
+]))
+
+RANK = {"low": 1, "medium": 2, "high": 3}
+# Validated workflow. Closed cases (resolved, false_positive) are reopened before changing outcome.
+TRANSITIONS = {
+    "open": {"investigating", "resolved", "false_positive"},
+    "investigating": {"open", "resolved", "false_positive"},
+    "resolved": {"open", "investigating"},
+    "false_positive": {"open", "investigating"},
+}
+CHUNK = 500
+
+
+class TransitionError(ValueError):
+    pass
+
+
+def event_columns(event):
+    return (event.get("timestamp"), event.get("eventid"), event.get("event_type") or event_type(event.get("eventid") or ""),
+            event.get("session"), event.get("sensor"), event.get("src_ip"))
+
+
+def chunks(values):
+    values = list(values)
+    for start in range(0, len(values), CHUNK):
+        yield values[start:start + CHUNK]
+
+
+def marks(values):
+    return ",".join("?" * len(values))
+
+
 RAW_COLUMNS = ("seq", "source_event_key", "event_id", "ingestion_mode", "source_id", "source_type", "file_id",
                "locator", "ingested_at", "parser_version", "schema_version", "raw_sha256")
 
@@ -107,7 +206,7 @@ class Store:
                 if version in applied:
                     continue
                 for statement in statements:
-                    db.execute(statement)
+                    statement(db) if callable(statement) else db.execute(statement)
                 db.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)", (version, name, utcnow()))
 
     def schema_version(self):
@@ -129,8 +228,8 @@ class Store:
             seq, prev = head if head else (0, GENESIS)
             for record in records:
                 event = record["event"]
-                inserted += db.execute("INSERT OR IGNORE INTO events VALUES (?, ?, ?)",
-                                       (event["id"], event["source"], json.dumps(event))).rowcount
+                inserted += db.execute("INSERT OR IGNORE INTO events(id, source, body, event_time, eventid, event_type, session, sensor, src_ip) VALUES (?,?,?,?,?,?,?,?,?)",
+                                       (event["id"], event["source"], json.dumps(event)) + event_columns(event)).rowcount
                 if record.get("raw") is None or db.execute("SELECT 1 FROM raw_events WHERE source_event_key=?", (record["key"],)).fetchone():
                     continue
                 seq += 1
@@ -222,30 +321,260 @@ class Store:
         with self.connect() as db:
             return dict(db.execute("SELECT id,status FROM workflow"))
 
-    def set_status(self, incident_id, status):
+    def set_status(self, incident_id, status, actor="local-analyst"):
+        if status not in TRANSITIONS:
+            raise ValueError(f"Choose {', '.join(TRANSITIONS)}")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT status FROM workflow WHERE id=?", (incident_id,)).fetchone()
             previous = row[0] if row else "open"
             if previous == status:
                 return
+            if status not in TRANSITIONS[previous]:
+                raise TransitionError(f"A {previous.replace('_', ' ')} incident must be reopened before it can become {status.replace('_', ' ')}.")
             db.execute("INSERT INTO workflow VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status", (incident_id, status))
-            db.execute("INSERT INTO activity(incident_id,timestamp,kind,body) VALUES (?,?,?,?)",
-                       (incident_id, datetime.now(timezone.utc).isoformat(), "status", f"{previous} → {status}"))
+            db.execute("INSERT INTO activity(incident_id,timestamp,kind,body,actor,before_value,after_value) VALUES (?,?,?,?,?,?,?)",
+                       (incident_id, utcnow(), "status", f"{previous} → {status}", actor, previous, status))
+
+    def _lineage(self, db, incident_id):
+        """The incident and every case merged into it, directly or transitively."""
+        ids, frontier = [incident_id], [incident_id]
+        while frontier:
+            frontier = [r[0] for r in db.execute(f"SELECT incident_id FROM incidents WHERE merged_into IN ({marks(frontier)})", frontier)
+                        if r[0] not in ids]
+            ids.extend(frontier)
+        return ids
 
     def activity(self, incident_id):
         with self.connect() as db:
-            return [dict(zip(("id", "timestamp", "kind", "body"), row)) for row in db.execute(
-                "SELECT id,timestamp,kind,body FROM activity WHERE incident_id=? ORDER BY id DESC", (incident_id,))]
+            ids = self._lineage(db, incident_id)
+            return [dict(zip(("id", "timestamp", "kind", "body", "actor", "before", "after"), row)) for row in db.execute(
+                f"SELECT id,timestamp,kind,body,actor,before_value,after_value FROM activity WHERE incident_id IN ({marks(ids)}) ORDER BY id DESC", ids)]
 
-    def add_note(self, incident_id, text):
+    def add_note(self, incident_id, text, actor="local-analyst"):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             count = db.execute("SELECT count(*) FROM activity WHERE incident_id=? AND kind='note'", (incident_id,)).fetchone()[0]
             if count >= 100:
                 raise ValueError("This incident has reached the lab limit of 100 notes.")
-            db.execute("INSERT INTO activity(incident_id,timestamp,kind,body) VALUES (?,?,?,?)",
-                       (incident_id, datetime.now(timezone.utc).isoformat(), "note", text))
+            db.execute("INSERT INTO activity(incident_id,timestamp,kind,body,actor) VALUES (?,?,?,?,?)",
+                       (incident_id, utcnow(), "note", text, actor))
+
+    # --- Detection results ------------------------------------------------------------------
+
+    def replace_detection(self, dataset, src_ips, compute, fingerprint):
+        """Recompute detection for some source addresses (all when src_ips is None) and store the result.
+        Reading events, computing, and writing happen in one write transaction, so concurrent ingestion
+        can never interleave with a stale result."""
+        now = utcnow()
+        full = src_ips is None
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if full:
+                bodies = [r[0] for r in db.execute("SELECT body FROM events WHERE source=?", (dataset,))]
+            else:
+                src_ips = sorted(set(src_ips))
+                bodies = [r[0] for part in chunks(src_ips)
+                          for r in db.execute(f"SELECT body FROM events WHERE source=? AND src_ip IN ({marks(part)})", [dataset, *part])]
+            incidents = compute([json.loads(b) for b in bodies])
+
+            def scoped(sql, extra=()):
+                if full:
+                    return list(db.execute(sql, (dataset, *extra)))
+                return [r for part in chunks(src_ips) for r in db.execute(sql + f" AND src_ip IN ({marks(part)})", (dataset, *extra, *part))]
+            previous = {r[0] for r in scoped("SELECT incident_id FROM incidents WHERE dataset=? AND active=1")}
+            old_findings = {r[0] for r in scoped("SELECT finding_id FROM findings WHERE dataset=? AND status='active'")}
+            if full:  # v0.2 cases have workflow or notes but no incident row yet
+                previous |= {r[0] for r in db.execute("SELECT id FROM workflow UNION SELECT incident_id FROM activity")} - \
+                            {r[0] for r in db.execute("SELECT incident_id FROM incidents")}
+            new_findings = set()
+            for incident in incidents:
+                for f in incident["findings"]:
+                    new_findings.add(f["finding_id"])
+                    db.execute("""INSERT INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,'active',?,?,?) ON CONFLICT(finding_id) DO UPDATE SET
+                        incident_id=excluded.incident_id, severity=excluded.severity, observed_at=excluded.observed_at, status='active',
+                        body=excluded.body, updated_at=excluded.updated_at""",
+                        (f["finding_id"], dataset, incident["id"], f["engine"], f["rule_id"], f["rule_version"], f["severity"], f["src_ip"],
+                         f["session_key"], f["observed_at"], json.dumps(f), now, now))
+                body = {k: v for k, v in incident.items() if k not in ("findings", "events", "status", "activity")}
+                body.update(finding_ids=[f["finding_id"] for f in incident["findings"]], fingerprint=fingerprint)
+                db.execute("""INSERT INTO incidents VALUES (?,?,?,?,?,?,?,1,NULL,?,?,?) ON CONFLICT(incident_id) DO UPDATE SET
+                    dataset=excluded.dataset, src_ip=excluded.src_ip, severity=excluded.severity, severity_rank=excluded.severity_rank,
+                    first_seen=excluded.first_seen, last_seen=excluded.last_seen, active=1, merged_into=NULL, body=excluded.body, updated_at=excluded.updated_at""",
+                    (incident["id"], dataset, incident["src_ip"], incident["severity"], RANK[incident["severity"]], incident["first_seen"],
+                     incident["last_seen"], json.dumps(body), now, now))
+            stale = sorted(old_findings - new_findings)
+            for part in chunks(stale):
+                db.execute(f"UPDATE findings SET status='superseded', updated_at=? WHERE finding_id IN ({marks(part)})", [now, *part])
+            merged = self._retire(db, dataset, previous - {i["id"] for i in incidents}, incidents, now)
+            if full:
+                db.execute("""INSERT INTO detection_state VALUES (?,?,?,0,NULL) ON CONFLICT(dataset) DO UPDATE SET
+                    fingerprint=excluded.fingerprint, computed_at=excluded.computed_at, dirty=0, last_error=NULL""", (dataset, fingerprint, now))
+        return dict(incidents=len(incidents), findings=len(new_findings), superseded=len(stale), merged=merged)
+
+    def _retire(self, db, dataset, gone, incidents, now):
+        """Cases that no longer exist are merged into the incident that now holds their session, carrying
+        their workflow status and leaving an audit entry; otherwise they are retired."""
+        merged = 0
+        statuses = dict(db.execute("SELECT id, status FROM workflow"))
+        for old in sorted(gone):
+            target = next((i for i in incidents if old in i["session_keys"]), None)
+            if not target:
+                db.execute("UPDATE incidents SET active=0, updated_at=? WHERE incident_id=?", (now, old))
+                continue
+            db.execute("""INSERT INTO incidents VALUES (?,?,?,?,?,?,?,0,?,'{}',?,?) ON CONFLICT(incident_id) DO UPDATE SET
+                active=0, merged_into=excluded.merged_into, updated_at=excluded.updated_at""",
+                (old, dataset, target["src_ip"], target["severity"], RANK[target["severity"]], target["first_seen"], target["last_seen"], target["id"], now, now))
+            carried = statuses.get(old, "open")
+            note = f"Detection update merged case {old[:8]} (status: {carried.replace('_', ' ')}) into this case."
+            if carried != "open" and target["id"] not in statuses:
+                db.execute("INSERT INTO workflow VALUES (?, ?)", (target["id"], carried))
+                statuses[target["id"]] = carried
+                note += " Its status was carried over."
+            db.execute("INSERT INTO activity(incident_id,timestamp,kind,body,actor,before_value,after_value) VALUES (?,?,?,?,?,?,?)",
+                       (target["id"], now, "merge", note, "aegis", old, target["id"]))
+            merged += 1
+        return merged
+
+    def detection_state(self, dataset):
+        with self.connect() as db:
+            row = db.execute("SELECT fingerprint, computed_at, dirty, last_error FROM detection_state WHERE dataset=?", (dataset,)).fetchone()
+        return dict(zip(("fingerprint", "computed_at", "dirty", "last_error"), row)) if row else None
+
+    def mark_dirty(self, dataset, error):
+        with self.connect() as db:
+            db.execute("""INSERT INTO detection_state(dataset, dirty, last_error) VALUES (?,1,?) ON CONFLICT(dataset) DO UPDATE SET
+                dirty=1, last_error=excluded.last_error""", (dataset, error[:200]))
+
+    def _events_by_id(self, db, ids):
+        found = {}
+        for part in chunks(ids):
+            found.update((r[0], json.loads(r[1])) for r in db.execute(f"SELECT id, body FROM events WHERE id IN ({marks(part)})", part))
+        return found
+
+    def _findings_by_id(self, db, ids):
+        found = {}
+        for part in chunks(ids):
+            found.update((r[0], json.loads(r[1])) for r in db.execute(f"SELECT finding_id, body FROM findings WHERE finding_id IN ({marks(part)})", part))
+        return found
+
+    def incidents(self, dataset, status=None, severity=None, limit=None, offset=0):
+        """Active incidents in queue order, with findings and workflow status."""
+        where, args = ["i.dataset=?", "i.active=1"], [dataset]
+        if status:
+            where.append("COALESCE(w.status, 'open')=?")
+            args.append(status)
+        if severity:
+            where.append("i.severity=?")
+            args.append(severity)
+        sql = f"FROM incidents i LEFT JOIN workflow w ON w.id=i.incident_id WHERE {' AND '.join(where)}"
+        page = f" LIMIT {int(limit)} OFFSET {int(offset)}" if limit else ""
+        with self.connect() as db:
+            total = db.execute(f"SELECT count(*) {sql}", args).fetchone()[0]
+            rows = db.execute(f"SELECT i.body, COALESCE(w.status, 'open') {sql} ORDER BY i.severity_rank DESC, i.last_seen DESC, i.incident_id DESC{page}", args).fetchall()
+            incidents = [{**json.loads(body), "status": state} for body, state in rows]
+            findings = self._findings_by_id(db, [f for i in incidents for f in i["finding_ids"]])
+        for incident in incidents:
+            incident["findings"] = [findings[f] for f in incident["finding_ids"] if f in findings]
+        return total, incidents
+
+    def incident(self, dataset, incident_id):
+        """One incident with findings, annotated events, and the activity of every case merged into it.
+        A merged case ID resolves to the incident that absorbed it."""
+        with self.connect() as db:
+            for _ in range(100):
+                row = db.execute("SELECT dataset, active, merged_into, body FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
+                if not row or row[0] != dataset:
+                    return None
+                if row[1]:
+                    break
+                if not row[2]:
+                    return None
+                incident_id = row[2]
+            else:
+                return None
+            incident = json.loads(row[3])
+            state = db.execute("SELECT status FROM workflow WHERE id=?", (incident_id,)).fetchone()
+            findings = self._findings_by_id(db, incident["finding_ids"])
+            events = self._events_by_id(db, [r["id"] for r in incident["event_refs"]])
+        incident.update(status=state[0] if state else "open", findings=[findings[f] for f in incident["finding_ids"] if f in findings],
+                        events=[{**events[r["id"]], "relationship": r["relationship"], "link": r["link"]} for r in incident["event_refs"] if r["id"] in events],
+                        activity=self.activity(incident_id))
+        return incident
+
+    def findings(self, dataset, filters, limit, offset):
+        where, args = ["dataset=?"], [dataset]
+        for column in ("engine", "rule_id", "severity", "status", "incident_id"):
+            if filters.get(column):
+                where.append(f"{column}=?")
+                args.append(filters[column])
+        sql = " AND ".join(where)
+        with self.connect() as db:
+            total = db.execute(f"SELECT count(*) FROM findings WHERE {sql}", args).fetchone()[0]
+            rows = db.execute(f"SELECT body, status, created_at, updated_at FROM findings WHERE {sql} ORDER BY observed_at DESC, finding_id LIMIT ? OFFSET ?",
+                              [*args, limit, offset]).fetchall()
+        return total, [{**json.loads(b), "status": st, "created_at": c, "updated_at": u} for b, st, c, u in rows]
+
+    def query_events(self, dataset, q="", filters=None, limit=50, offset=0):
+        where, args = ["source=?"], [dataset]
+        if q:
+            where.append("body LIKE ? ESCAPE '\\'")
+            args.append("%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        for column in ("event_type", "eventid", "session", "sensor", "src_ip"):
+            if (filters or {}).get(column):
+                where.append(f"{column}=?")
+                args.append(filters[column])
+        if (filters or {}).get("since"):
+            where.append("event_time >= ?")
+            args.append(filters["since"])
+        if (filters or {}).get("until"):
+            where.append("event_time < ?")
+            args.append(filters["until"])
+        sql = " AND ".join(where)
+        with self.connect() as db:
+            total = db.execute(f"SELECT count(*) FROM events WHERE {sql}", args).fetchone()[0]
+            rows = db.execute(f"SELECT body FROM events WHERE {sql} ORDER BY event_time DESC, id DESC LIMIT ? OFFSET ?", [*args, limit, offset]).fetchall()
+        return total, [json.loads(r[0]) for r in rows]
+
+    def overview(self, dataset):
+        with self.connect() as db:
+            events, sources, sensors = db.execute("SELECT count(*), count(DISTINCT src_ip), count(DISTINCT sensor) FROM events WHERE source=?", (dataset,)).fetchone()
+            bins = db.execute("SELECT substr(event_time, 1, 16) AS minute, count(*) FROM events WHERE source=? GROUP BY minute ORDER BY minute DESC LIMIT 40",
+                              (dataset,)).fetchall()
+        return dict(events=events, sources=sources, sensors=sensors, timeline=[{"time": m, "count": c} for m, c in reversed(bins)])
+
+    def session_timeline(self, dataset, session, sensor=None, limit=2000):
+        where, args = ["source=?", "session=?"], [dataset, session]
+        if sensor:
+            where.append("sensor=?")
+            args.append(sensor)
+        with self.connect() as db:
+            rows = db.execute(f"SELECT body FROM events WHERE {' AND '.join(where)} ORDER BY event_time, id LIMIT ?", [*args, limit + 1]).fetchall()
+            events = [json.loads(r[0]) for r in rows]
+            ids = {e["id"] for e in events[:limit]}
+            src_ips = sorted({e["src_ip"] for e in events})
+            candidates = [json.loads(r[0]) for part in chunks(src_ips) for r in db.execute(
+                f"SELECT body FROM findings WHERE dataset=? AND status='active' AND src_ip IN ({marks(part)})", [dataset, *part])]
+        findings = [f for f in candidates if ids & set(f["evidence_event_ids"])]
+        return dict(events=events[:limit], truncated=len(events) > limit, findings=findings,
+                    incident_ids=sorted({f.get("incident_id") for f in findings} - {None}))
+
+    def provenance(self, event_ids):
+        """Raw-evidence provenance per event (never the raw bytes)."""
+        columns = ("seq", "event_id", "ingestion_mode", "source_id", "source_type", "file_id", "locator", "ingested_at",
+                   "parser_version", "schema_version", "raw_sha256", "chain_hash")
+        found = {}
+        with self.connect() as db:
+            for part in chunks(sorted(set(event_ids))):
+                for row in db.execute(f"SELECT {','.join(columns)} FROM raw_events WHERE event_id IN ({marks(part)}) ORDER BY seq", part):
+                    record = dict(zip(columns, row))
+                    found.setdefault(record.pop("event_id"), []).append(record)
+        return found
+
+    def chain_head(self):
+        with self.connect() as db:
+            row = db.execute("SELECT seq, chain_hash FROM raw_events ORDER BY seq DESC LIMIT 1").fetchone()
+        return dict(head_seq=row[0], head_hash=row[1]) if row else dict(head_seq=None, head_hash=None)
 
     def raw_count(self):
         with self.connect() as db:

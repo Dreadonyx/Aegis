@@ -155,8 +155,8 @@ app factory.
 | Existing behavior mapped + regression-covered | ◐ mapped here; baseline green |
 | Live Cowrie ingestion survives restart | ◐ works via dedup; no durable checkpoint |
 | Rotation / partial / malformed / dup / DB-outage tested | ◐ partial (rotation, partial, dup yes; malformed-continue + DB-outage no) |
-| Provenance + synthetic/live separation preserved in exports | ✗ raw not preserved; live==imported collision |
-| Findings carry reproducible rationale + exact evidence IDs | ✓ (rationale), ◐ (no finding_id/version/status) |
+| Provenance + synthetic/live separation preserved in exports | ✓ (Phase 1-2) |
+| Findings carry reproducible rationale + exact evidence IDs | ✓ (Phase 2) |
 | Rule/stat/ML layers fail independently | ✗ only rules exist |
 | ML disabled by default until evaluated | n/a — not built |
 | Authn/authz, validation, rate limits, secret handling reviewed | ◐ validation/CSRF yes; no authn, no rate limits |
@@ -199,3 +199,26 @@ Phase 1 is complete against the spec's Phase 1 list. Carried into later phases, 
 - Lines written immediately before a copy-truncate rotation can be lost; this is inherent to copy-truncate, and Cowrie uses rename rotation.
 
 Gate changes: "Live Cowrie ingestion survives restart" → ✓. "Rotation / partial / malformed / dup / DB-outage tested" → ✓. "Provenance + synthetic/live separation" → ◐ (stored and separated; provenance is not yet in exports). "Health, readiness, lag, error metrics" → ✓ (structured logs remain for Phase 7). "Migrations" → ◐ (runner yes; backup/restore not yet tested).
+
+---
+
+## Phase 2 progress (2026-10-11)
+
+Implemented, with tests:
+
+- Canonical layer (`aegis/canonical.py`, schema 2): fields checked against the Cowrie 3.1.1 output reference; identity unchanged from schema 1; vendor-neutral `event_type`; command events require `input`. Verified against upstream that a download's `url` is optional (stdin/redirect captures) and that sessions report `duration_ms`.
+- Rules (`aegis/rules.py`): validated, configurable thresholds, grouping, discovery commands, and rule disabling; per-rule versions and severity rationale; burst-merged AUTH-001; new XFER-002 for SCP/SFTP uploads; machine-readable facts on every finding.
+- Sequences (`aegis/sequences.py`): SEQ-001 and SEQ-002 in event-time order with strong/weak link labels.
+- Fusion (`aegis/fusion.py`): session-based grouping, stable earliest-anchor incident IDs, transparent correlation reasons, event link labels.
+- Persistence (migration 3, `aegis/analysis.py`): indexed event columns backfilled from existing data; persisted findings (`active`/`superseded`) and incidents; incremental detection after each commit in one transaction; full recompute on rule or settings change; merge handling that carries status and records an audit entry; detection failures mark the dataset dirty without affecting ingestion.
+- Workflow: `false_positive` status, validated transitions (409), actor and before/after values (backfilled for v0.2 history).
+- API: SQL-backed event filters, `/api/v1/incidents`, `/api/v1/findings`, `/api/v1/sessions/<id>/timeline`, `/api/v1/detection`; evidence export schema 2 with provenance and chain head; reports with rationale, provenance, correlation, link labels, and an explicit synthetic-data disclaimer.
+- UI: rationale, facts, versions, and engine per finding; weak-link notes and tags; false-positive workflow; control, bidirectional, and zero-width characters shown as visible escapes.
+
+Deliberate contract changes, each tested: evidence export `schema_version` 1 → 2 (fields added); a brute-force burst and the login it precedes are now one incident (spec §7), which changed one v0.2 test's lookup but not its assertions; the evaluation suite grew from 10 to 20 fixtures.
+
+Verification: 81 tests pass. Nine deliberate mutations (no burst merging, anchor-only fusion, status not carried on merge, sequence order ignored, extra fields in identity, detection errors escaping, nothing superseded, transitions unchecked, no weak-link labels) each made at least one test fail. The Playwright smoke test passes, now including control-character escaping. A real server run fused 7 failures plus a live-appended login, command, and download into one incident with six findings, identical after restart.
+
+Gate changes: "Findings carry reproducible rationale + exact evidence IDs" → ✓. "Provenance + synthetic/live separation preserved in exports" → ✓. "Migrations" stays ◐ (backup/restore untested, Phase 7).
+
+Not in Phase 2 (by the spec's plan): statistical analytics (Phase 3), ML (Phase 4), authentication (Phase 7; the actor is `local-analyst` until then), and changing detection settings from the UI (needs authentication).
