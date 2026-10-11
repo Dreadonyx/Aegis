@@ -264,7 +264,8 @@ def test_import_and_replay_record_provenance_without_exposing_passwords(client):
     assert client.get("/api/v1/evidence/verify").get_json()["records"] == 19
     store = client.application.extensions["store"]
     with sqlite3.connect(store.path) as db:
-        assert db.execute("SELECT count(*) FROM raw_events WHERE raw LIKE '%hunter2%'").fetchone()[0] == 1
+        # raw is a BLOB; compare bytes directly (SQL LIKE on BLOBs differs between SQLite builds)
+        assert sum(b"hunter2" in raw for (raw,) in db.execute("SELECT raw FROM raw_events WHERE raw IS NOT NULL")) == 1
     incident = client.get("/api/overview?source=imported").get_json()
     responses = [json.dumps(incident), client.get("/api/events?source=imported").text]
     responses += [client.get(f"/api/incidents/{i['id']}/evidence?source=imported").text for i in incident["incidents"]]
