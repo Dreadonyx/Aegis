@@ -55,6 +55,10 @@ python3 -m aegis.labeled_eval datasets/live-2026-10-28 --test-after 2026-10-23T0
 
 To keep the measurement window untouched, give `calibrate` a labeled export that ends where the test window begins (`labels export --until 2026-10-23T00:00:00Z`). Calibration refuses sessions from the training window unless you pass `--allow-overlap`, writes a new model version (the original is never edited), records the full precision/recall curve, and warns when fewer than 20 malicious sessions make the threshold unstable.
 
+## One-command real-data evaluation
+
+`python3 -m aegis.realdata path/to/cowrie-logs --out data/reports/<name>` ingests real logs into a fresh database, labels sessions with documented behavioral criteria (recorded as an automated actor), and runs a forward-chaining ML backtest plus a single time split. It reports Wilson 95% intervals and writes `report.md` and `report.json`. Use `--note` to record caveats, such as a rule designed after seeing the same data. Keep the output under `data/`: it contains attacker addresses. See [REALDATA_EVALUATION.md](REALDATA_EVALUATION.md) for the first results.
+
 ## Getting labeled data
 
 Options, roughly from best to quickest:

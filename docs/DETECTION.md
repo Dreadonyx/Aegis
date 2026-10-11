@@ -1,6 +1,6 @@
 # Detection reference (ruleset 2026.10.2)
 
-Detection is layered: canonical events → deterministic rules (Layer A), sequences (Layer D), and statistics (Layer B) → evidence fusion into incidents. Optional ML (Layer C) is implemented but off by default (see below). Everything here is deterministic and covered by fixtures in `aegis/evaluate.py` (31 checks, also shown under **Lab & validation**). To measure detection against labeled data, see [EVALUATION.md](EVALUATION.md).
+Detection is layered: canonical events → deterministic rules (Layer A), sequences (Layer D), and statistics (Layer B) → evidence fusion into incidents. Optional ML (Layer C) is implemented but off by default (see below). Everything here is deterministic and covered by fixtures in `aegis/evaluate.py` (36 checks, also shown under **Lab & validation**). Real-data results are in [REALDATA_EVALUATION.md](REALDATA_EVALUATION.md). To measure detection against labeled data, see [EVALUATION.md](EVALUATION.md).
 
 ## Canonical events (schema 2)
 
@@ -17,6 +17,7 @@ Detection is layered: canonical events → deterministic rules (Layer A), sequen
 | ID | Version | Severity | Trigger | Grouping |
 |---|---|---|---|---|
 | AUTH-001 | 2 | medium | ≥ `auth_failure_threshold` failed logins within `auth_failure_window_seconds` | source address (+ sensor by default); overlapping windows merge into one finding per burst |
+| INT-001 | 2 | medium | an accepted login followed by shell input (or a command Cowrie reports as failed) in the same session | one finding per session; added 2026-10-11 after real data showed one-command bots evading every other rule |
 | AUTH-002 | 2 | high | accepted login with ≥ `login_failure_threshold` earlier failures within `login_lookback_seconds` | same as AUTH-001; one finding per login session |
 | DISC-001 | 2 | low | shell input runs a command in `discovery_commands` (command position only; quoted text and stdin ignored) | one finding per session |
 | XFER-001 | 2 | high | `cowrie.session.file_download` (completed; failed downloads never match) | one finding per session |

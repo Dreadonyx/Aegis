@@ -222,7 +222,7 @@ def _point(threshold, scores, positives):
             "f1": round(f1, 4), "false_positive_rate": round(fp / (fp + tn), 4) if fp + tn else None}
 
 
-def calibrate(model_dir, labeled_dir, out_dir, config, test_after=None, objective="f1", allow_overlap=False):
+def calibrate(model_dir, labeled_dir, out_dir, config, test_after=None, objective="f1", allow_overlap=False, before=None):
     """Choose a threshold on labeled sessions from after the training window and write a new model version.
     The original model is never modified."""
     from aegis import labeled_eval
@@ -231,7 +231,8 @@ def calibrate(model_dir, labeled_dir, out_dir, config, test_after=None, objectiv
     data_manifest, events, rejected, labels, files = labeled_eval.load(labeled_dir)
     by_key = {(label.get("sensor"), label["session"]): label for label in labels}
     label_of = lambda r: by_key.get((r["sensor"], r["session"])) or by_key.get((None, r["session"]))
-    rows = [r for r in session_features(events, config) if label_of(r) and (test_after is None or r["first_seen"] >= test_after)]
+    rows = [r for r in session_features(events, config) if label_of(r) and (test_after is None or r["first_seen"] >= test_after)
+            and (before is None or r["first_seen"] < before)]
     trained = model.manifest["training"]
     overlap = (trained.get("files_sha256", {}).get("events.jsonl") == files["events.jsonl"]) or \
               bool(trained.get("until") and any(r["first_seen"] < trained["until"] for r in rows))
@@ -276,7 +277,7 @@ def calibrate(model_dir, labeled_dir, out_dir, config, test_after=None, objectiv
                               "meaning": f"Calibrated for {objective} on labeled sessions; flags sessions scoring above it."},
                 "calibration": {"calibrated_from": model.manifest["model_version"], "calibrated_at": calibrated_at, "objective": objective,
                                 "dataset": f"{data_manifest.get('name')} v{data_manifest.get('version')}", "files_sha256": files,
-                                "test_after": test_after, "sessions": len(rows), "malicious": len(positives), "chosen": chosen,
+                                "test_after": test_after, "before": before, "sessions": len(rows), "malicious": len(positives), "chosen": chosen,
                                 "curve": curve if len(curve) <= 200 else curve[::max(1, len(curve) // 200)], "warnings": warnings}}
     (out / "model.json").write_text(json.dumps(manifest, indent=2))
     return manifest
@@ -327,6 +328,7 @@ def main(argv=None):
     c.add_argument("--model", required=True)
     c.add_argument("--labeled", required=True)
     c.add_argument("--test-after", help="Only use labeled sessions starting at or after this ISO 8601 time")
+    c.add_argument("--before", help="Only use labeled sessions starting before this ISO 8601 time (keeps a later test window untouched)")
     c.add_argument("--objective", default="f1", help="f1 (default), precision:0.9, or recall:0.8")
     c.add_argument("--allow-overlap", action="store_true")
     c.add_argument("--config")
@@ -339,7 +341,7 @@ def main(argv=None):
         config = load_config(args.config)
         if args.command == "calibrate":
             result = calibrate(args.model, args.labeled, args.out, config, _utc(args.test_after, "--test-after") if args.test_after else None,
-                               args.objective, args.allow_overlap)
+                               args.objective, args.allow_overlap, _utc(args.before, "--before") if args.before else None)
             print(json.dumps({"model_version": result["model_version"], "calibration": {k: v for k, v in result["calibration"].items() if k != "curve"}}, indent=2))
             return 0
         if args.command == "inspect":

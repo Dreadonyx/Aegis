@@ -149,13 +149,14 @@ def test_live_detection_runs_after_each_commit_and_handles_late_events(client, t
     log.write_bytes(jsonl(raw(30, eventid="cowrie.login.success", session="entry"), raw(35, eventid="cowrie.command.input", input="echo hi", session="entry")))
     collector = live_collector(client, log)
     collector.poll()
-    assert client.get("/api/overview?source=live").get_json()["incidents"] == []
+    first = client.get("/api/overview?source=live").get_json()["incidents"]
+    assert [sorted(f["id"] for f in i["findings"]) for i in first] == [["INT-001"]]
     with log.open("ab") as f:  # earlier failures arrive late
         f.write(jsonl(*[raw(n * 5, session=f"g{n}") for n in range(5)]))
     collector.poll()
     incidents = client.get("/api/overview?source=live").get_json()["incidents"]
     assert len(incidents) == 1
-    assert {f["id"] for f in incidents[0]["findings"]} == {"AUTH-001", "AUTH-002", "SEQ-002"}
+    assert {f["id"] for f in incidents[0]["findings"]} == {"AUTH-001", "AUTH-002", "INT-001", "SEQ-002"}
 
 
 def test_merged_case_keeps_status_and_audit_trail(client, tmp_path):
@@ -257,7 +258,7 @@ def test_session_timeline(client):
     client.post("/api/replay")
     timeline = client.get("/api/v1/sessions/demo-auth/timeline").get_json()
     assert len(timeline["events"]) == 8 and not timeline["truncated"]
-    assert {f["rule_id"] for f in timeline["findings"]} == {"AUTH-001", "AUTH-002", "DISC-001", "SEQ-002"}
+    assert {f["rule_id"] for f in timeline["findings"]} == {"AUTH-001", "AUTH-002", "INT-001", "DISC-001", "SEQ-002"}
     assert [e["timestamp"] for e in timeline["events"]] == sorted(e["timestamp"] for e in timeline["events"])
     assert client.get("/api/v1/sessions/missing/timeline").status_code == 404
 

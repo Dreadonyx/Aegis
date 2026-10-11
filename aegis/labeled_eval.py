@@ -9,7 +9,8 @@ DATASET_DIR contains:
                   "types": ["credential_access", "discovery", "transfer", "intrusion_sequence", "anomaly"] (optional)}
 
 Labels are per session. A session is predicted positive when any finding's evidence includes one of its
-events. Metrics describe this dataset only; the report states its size, balance, and limitations."""
+events. Sensor-level findings (STAT-001 event-rate spikes) make no claim about individual sessions, so they
+are reported but not attributed to the sessions in their time bucket. Metrics describe this dataset only; the report states its size, balance, and limitations."""
 import argparse
 import hashlib
 import json
@@ -27,6 +28,16 @@ TYPE_RULES = {"credential_access": {"AUTH-001", "AUTH-002"}, "discovery": {"DISC
 LABELS = ("malicious", "benign")
 
 
+def wilson(successes, trials, z=1.96):
+    """95% Wilson score interval for a proportion; None when there are no trials."""
+    if not trials:
+        return None
+    p = successes / trials
+    centre = (p + z * z / (2 * trials)) / (1 + z * z / trials)
+    margin = z * ((p * (1 - p) + z * z / (4 * trials)) / trials) ** 0.5 / (1 + z * z / trials)
+    return [round(max(0.0, centre - margin), 4), round(min(1.0, centre + margin), 4)]
+
+
 def metrics(predicted, positives, population):
     tp = len(predicted & positives)
     fp = len(predicted - positives)
@@ -36,7 +47,8 @@ def metrics(predicted, positives, population):
     precision, recall = ratio(tp, tp + fp), ratio(tp, tp + fn)
     f1 = round(2 * precision * recall / (precision + recall), 4) if precision and recall else (0.0 if precision == 0 or recall == 0 else None)
     return {"confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn}, "precision": precision, "recall": recall, "f1": f1,
-            "false_positive_rate": ratio(fp, fp + tn), "support": {"positive": len(positives), "negative": len(population - positives)}}
+            "false_positive_rate": ratio(fp, fp + tn), "support": {"positive": len(positives), "negative": len(population - positives)},
+            "ci95": {"precision": wilson(tp, tp + fp), "recall": wilson(tp, tp + fn), "false_positive_rate": wilson(fp, fp + tn)}}
 
 
 def digest(path):
@@ -92,7 +104,8 @@ def evaluate_dataset(directory, config=None, test_after=None, model_dir=None):
         model = ml.load(model_dir, config["ml_max_model_age_days"])  # evaluation may score a synthetic model; leakage is reported below
         findings += ml.compute(events, {**config, "ml_enabled": True}, model_dir, lambda *_: model)["findings"]
     event_session = {e["id"]: (e["sensor"], e["session"]) for e in events}
-    touched = {f["finding_id"]: {event_session[i] for i in f["evidence_event_ids"]} for f in findings}
+    sensor_level = [f for f in findings if f.get("scope", {}).get("type") == "sensor"]
+    touched = {f["finding_id"]: set() if f in sensor_level else {event_session[i] for i in f["evidence_event_ids"]} for f in findings}
     predicted = lambda keep: set().union(*([touched[f["finding_id"]] for f in findings if keep(f)] or [set()])) & population
 
     results = {"any": metrics(predicted(lambda f: True), positives, population)}
@@ -140,7 +153,9 @@ def evaluate_dataset(directory, config=None, test_after=None, model_dir=None):
     return {"dataset": {k: manifest.get(k) for k in ("name", "version", "description", "source", "license", "synthetic")}, "files_sha256": files,
             "split": {"test_after": test_after, "method": "time-separated" if test_after else "whole dataset"},
             "sessions": {"evaluated": n, "malicious": malicious, "benign": n - malicious, "unlabeled_excluded": unlabeled},
-            "events": {"accepted": len(events), "rejected": rejected}, "model": model_info, "detectors": results, "by_type": by_type, "by_sensor": by_sensor,
+            "events": {"accepted": len(events), "rejected": rejected}, "model": model_info,
+            "sensor_level_findings": {"count": len(sensor_level), "rules": sorted({f["rule_id"] for f in sensor_level}),
+                                      "note": "Reported, not attributed to individual sessions."}, "detectors": results, "by_type": by_type, "by_sensor": by_sensor,
             "limitations": limitations}
 
 
@@ -149,11 +164,12 @@ def markdown(result):
     lines = [f"# Detection evaluation: {d['name']} v{d['version']}", "", d.get("description") or "",
              f"Sessions evaluated: {result['sessions']['evaluated']} ({result['sessions']['malicious']} malicious, {result['sessions']['benign']} benign). "
              f"Split: {result['split']['method']}{' after ' + result['split']['test_after'] if result['split']['test_after'] else ''}.", "",
-             "| Detector | Precision | Recall | F1 | FPR | TP | FP | FN | TN |", "|---|---|---|---|---|---|---|---|---|"]
+             "| Detector | Precision [95% CI] | Recall [95% CI] | F1 | FPR | TP | FP | FN | TN |", "|---|---|---|---|---|---|---|---|---|"]
     fmt = lambda v: "n/a" if v is None else f"{v:.3f}"
+    ci = lambda m, k: "" if not m["ci95"][k] else f" [{m['ci95'][k][0]:.2f}–{m['ci95'][k][1]:.2f}]"
     for name, m in list(result["detectors"].items()) + [(f"type:{k}", v) for k, v in result["by_type"].items()]:
         c = m["confusion"]
-        lines.append(f"| {name} | {fmt(m['precision'])} | {fmt(m['recall'])} | {fmt(m['f1'])} | {fmt(m['false_positive_rate'])} | {c['tp']} | {c['fp']} | {c['fn']} | {c['tn']} |")
+        lines.append(f"| {name} | {fmt(m['precision'])}{ci(m, 'precision')} | {fmt(m['recall'])}{ci(m, 'recall')} | {fmt(m['f1'])} | {fmt(m['false_positive_rate'])} | {c['tp']} | {c['fp']} | {c['fn']} | {c['tn']} |")
     lines += ["", "## Limitations"] + [f"- {item}" for item in result["limitations"]]
     lines += ["", "Dataset files (SHA-256): " + ", ".join(f"{k} {v[:16]}" for k, v in result["files_sha256"].items())]
     return "\n".join(lines)

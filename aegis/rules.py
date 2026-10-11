@@ -28,7 +28,7 @@ DEFAULT_CONFIG = {
     "ml_max_model_age_days": 90,
     "disabled_rules": [],
 }
-RULE_IDS = ("AUTH-001", "AUTH-002", "DISC-001", "XFER-001", "XFER-002")
+RULE_IDS = ("AUTH-001", "AUTH-002", "INT-001", "DISC-001", "XFER-001", "XFER-002")
 SEQUENCE_IDS = ("SEQ-001", "SEQ-002")
 STAT_IDS = ("STAT-001", "STAT-002", "STAT-003", "STAT-004")
 ML_IDS = ("ML-001",)
@@ -92,6 +92,9 @@ def catalog(config):
         rule(id="AUTH-002", name="Login following repeated failures", severity="high", technique=None, category="initial-access",
              severity_rationale="The honeypot accepted credentials after guessing, so follow-on activity is likely. This does not establish a real account compromise.",
              description=f"A honeypot login succeeds within {config['login_lookback_seconds']} seconds after at least {config['login_failure_threshold']} failures from the same source address {scope}. Failures may come from other sessions."),
+        rule(id="INT-001", name="Shell input after an accepted login", severity="medium", technique="T1059.004", category="execution",
+             severity_rationale="Hands-on or scripted shell use after the honeypot accepted credentials; never legitimate on a honeypot, but scripted one-command probes are common and low impact.",
+             description="A honeypot login is accepted and shell input (or a command Cowrie reports as failed) follows in the same session. Input is observed; execution success is not established."),
         rule(id="DISC-001", name="System discovery command observed", severity="low", technique="T1082", category="discovery",
              severity_rationale="Common reconnaissance that is frequently benign on its own.",
              description=f"Shell input runs one of these as a command: {', '.join(config['discovery_commands'])}. Input is observed; execution success is not established."),
@@ -244,6 +247,20 @@ def rule_findings(events, config):
                              + ", not by session. Clients behind shared addresses can appear as one source."}
             explanation = f"Login accepted at {anchor['timestamp']} after {len(first)} failures from {anchor['src_ip']} in the previous {lookback} seconds."
             findings.append(make_finding(meta["AUTH-002"], anchor, evidence, facts, explanation, anchor_key(anchor, "AUTH-002")))
+    if enabled("INT-001"):
+        logged_in, matches = {}, []
+        for e in events:
+            key = session_key(e)
+            if e["eventid"] == "cowrie.login.success":
+                logged_in.setdefault(key, e)
+            elif key in logged_in and (is_shell_command(e) or e["eventid"] == "cowrie.command.failed"):
+                matches.append((e, logged_in[key]))
+        for items in per_session(matches):
+            login, commands = items[0][1], [e for e, _ in items]
+            facts = {"commands": len(commands), "login_at": login["timestamp"], "first_command_at": commands[0]["timestamp"],
+                     "seconds_to_first_command": round(ts(commands[0]) - ts(login), 3)}
+            explanation = f"Login accepted at {login['timestamp']}, then {len(commands)} shell input(s) in session {login['session']}."
+            findings.append(make_finding(meta["INT-001"], commands[0], [login] + commands, facts, explanation, anchor_key(login, "INT-001")))
     if enabled("DISC-001"):
         names = set(config["discovery_commands"])
         matches = [(e, discovery_commands(e["input"], names)) for e in events if is_shell_command(e)]

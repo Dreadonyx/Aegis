@@ -41,7 +41,7 @@ Replays are idempotent. Demo and imported telemetry have separate namespaces and
 - Live collector with a durable checkpoint (file identity + byte offset) committed in the same transaction as its events; it resumes after restart, drains rename-rotated files (and finds them again by inode after a restart), resets on truncation, waits for partial lines, quarantines malformed or oversized lines without storing their content, and backs off without advancing when storage is unavailable.
 - Hash-chained raw evidence: the original record bytes, a SHA-256 digest, and provenance (ingestion mode, source, file identity, record locator, parser and schema versions) for every live, uploaded, or synthetic record, with a verification endpoint. See the [evidence and retention policy](docs/EVIDENCE_POLICY.md).
 - Separate `demo`, `imported`, and `live` datasets; versioned schema migrations; liveness, readiness, and per-source health endpoints.
-- Five versioned, configurable rules (repeated failures, login after failures, discovery commands, completed downloads, SCP/SFTP uploads) and two ordered sequences (login → discovery → transfer; failures → login → shell input). Every finding stores its exact evidence, machine-readable facts, rule version, and severity rationale. See the [detection reference](docs/DETECTION.md).
+- Six versioned, configurable rules (repeated failures, login after failures, shell input after login, discovery commands, completed downloads, SCP/SFTP uploads) and two ordered sequences (login → discovery → transfer; failures → login → shell input). Every finding stores its exact evidence, machine-readable facts, rule version, and severity rationale. See the [detection reference](docs/DETECTION.md).
 - Statistical signals (median/MAD robust baselines, no lookahead, explicit cold-start status): sensor event-rate spikes, username breadth per source, command volume and duration per session. Signals are low severity, carry a robust z-score kept apart from severity, and never create incidents on their own.
 - Optional Isolation Forest scoring (off by default): manual, window-bounded training with a manifest; integrity-checked, fail-closed loading; scores reported as training percentiles, never probabilities. See the [ML section](docs/DETECTION.md#optional-ml-layer-c).
 - Investigation workspace: event filters (type, session, sensor, source, UTC time range) with a spreadsheet-safe CSV export; per-event provenance with the original record (passwords masked); a session view with ordered timeline, linked findings, and analyst labels with history; Findings and Sources views.
@@ -132,6 +132,7 @@ python3 -m pytest -q
 python3 -m aegis.evaluate
 python3 -m aegis.labeled_eval path/to/labeled-dataset   # see docs/EVALUATION.md
 python3 -m aegis.ml train --help                         # optional ML layer, see docs/DETECTION.md
+python3 -m aegis.realdata path/to/cowrie-logs --out data/reports/run   # real-data evaluation, see docs/REALDATA_EVALUATION.md
 python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 ```

@@ -222,6 +222,14 @@ def test_labeled_evaluation_reports_metrics_and_limitations(tmp_path):
     assert split["sessions"]["evaluated"] == 4 and split["split"]["method"] == "time-separated"
 
 
+def test_sensor_level_spikes_are_not_scored_per_session(tmp_path):
+    records = spike()  # STAT-001 fires on the final bucket's 100 connection sessions
+    labels = [{"session": r["session"], "label": "benign"} for r in records]
+    result = labeled_eval.evaluate_dataset(write_dataset(tmp_path / "ds", labels, records), validate_config({}))
+    assert result["sensor_level_findings"]["rules"] == ["STAT-001"]
+    assert result["detectors"]["STAT-001"]["confusion"]["fp"] == 0 and result["detectors"]["any"]["confusion"]["fp"] == 0
+
+
 def test_labeled_evaluation_cli_and_input_errors(tmp_path, capsys):
     good = write_dataset(tmp_path / "good", [{"session": "in", "label": "malicious"}], labeled_events())
     assert labeled_eval.main([str(good)]) == 0

@@ -289,3 +289,11 @@ Implemented, with tests:
 Verification: 120 tests pass; seven mutations (formula guard, control escaping, password masking, login-message masking, label history, calibration overlap, export redaction) each made a test fail. The browser smoke test now covers filters and CSV, provenance and the masked original, session labeling, and the Findings and Sources views.
 
 Gate change: "Event provenance and synthetic/live separation are visible and preserved in exports" → ✓ (visible in the UI as well as stored and exported).
+
+---
+
+## Real-data detection and ML evaluation (2026-10-11)
+
+`aegis/realdata.py` runs a reproducible evaluation on real Cowrie logs: criteria labels, a forward-chaining ML backtest (training only on earlier sessions), a single time split, and Wilson intervals. On 170 real sessions (6 alert-worthy), frozen rules caught 2 of 5 out-of-sample intrusions with no false alarms; rules OR real-data ML with thresholds from earlier labels caught 3 of 5. Fixes found along the way: sensor-level statistical findings are no longer attributed to sessions in evaluation; log discovery recurses into the per-host folder `aws s3 sync` creates. INT-001 (shell input after an accepted login) closes the observed gap; its 6/6 is in-sample and near-circular with the labeling criteria. Details: `docs/REALDATA_EVALUATION.md`.
+
+Gate status: "Labeled detection evaluation reports meaningful metrics and limitations" stays ◐. The harness and a first real measurement exist, but labels are automated and positives are few; independent labels and the full collection through 2026-10-28 are required.

