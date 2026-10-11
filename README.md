@@ -2,7 +2,7 @@
 
 **An evidence-first SOC and deception lab.** Import or collect Cowrie telemetry, inspect explainable detections, follow incident timelines, and export analyst reports.
 
-This is Aegis 2.0, in development on `main`. It is not production-ready: open release gates are tracked in the [2.0 audit](docs/AEGIS_2_0_REPO_AUDIT.md#7-release-gate-status-snapshot-spec-17). The 1.0 lab, including the AWS honeypot deployment, is preserved on the `aegis-1.0` branch. Aegis runs a real Cowrie sensor with a separate synthetic demo and is intended for learning, defensive research, and repeatable portfolio demonstrations.
+This is Aegis 2.0.0-rc1, a release candidate on `main`. It is not certified production-ready: one specification release gate (independent labeled evaluation) remains open; see the [release gate review](docs/AEGIS_2_0_REPO_AUDIT.md#release-gate-review-2026-10-11). The 1.0 lab, including the AWS honeypot deployment, is preserved on the `aegis-1.0` branch. Aegis runs a real Cowrie sensor with a separate synthetic demo and is intended for learning, defensive research, and repeatable portfolio demonstrations.
 
 ![Aegis investigation workspace](docs/screenshots/workspace.png)
 
@@ -92,6 +92,13 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `AEGIS_DB` | SQLite path | `data/aegis.sqlite3` |
+| `AEGIS_ENV` | `development` or `production` (production requires sign-in and a secret key) | `development` |
+| `AEGIS_AUTH` | `required` or `off` | `off` in development |
+| `AEGIS_SECRET_KEY` | Session signing key, 32+ characters (required in production) | Random per process |
+| `AEGIS_TRUSTED_HOSTS` / `AEGIS_TRUSTED_PROXY` | Extra hostnames; reverse-proxy address for X-Forwarded-* | Loopback only / unset |
+| `AEGIS_METRICS_TOKEN` | Bearer token for metrics scrapers | Unset |
+| `AEGIS_RAW_RETENTION_DAYS` | Daily purge of raw bytes older than this | Keep forever |
+| `AEGIS_LOG_LEVEL` / `AEGIS_THREADS` | Log level; waitress threads | `INFO` / `8` |
 | `AEGIS_PORT` | HTTP port | `8000` |
 | `AEGIS_BIND` | HTTP listen address | `127.0.0.1` |
 | `AEGIS_COWRIE_LOG` | Local Cowrie JSONL file to follow | Disabled |
@@ -137,6 +144,7 @@ python3 -m aegis.evaluate
 python3 -m aegis.labeled_eval path/to/labeled-dataset   # see docs/EVALUATION.md
 python3 -m aegis.ml train --help                         # optional ML layer, see docs/DETECTION.md
 python3 -m aegis.realdata path/to/cowrie-logs --out data/reports/run   # real-data evaluation, see docs/REALDATA_EVALUATION.md
+python3 -m aegis.loadtest --events 50000 --out data/loadtest            # load test, see docs/PERFORMANCE.md
 python3 -m playwright install chromium
 python3 tests/browser_smoke.py
 ```
@@ -145,15 +153,19 @@ The browser smoke test expects the Compose stack at port 8000. It checks the SSH
 
 See [verification notes](docs/VERIFICATION.md) for completed checks and interpretation limits.
 
-## Current boundaries and next milestones
+## Production use
 
-This is a single-user local lab using Flask's development server. It has no user accounts, TLS, production retention system, high-throughput streaming engine, or automated incident response. The event cap is 50,000; detection is recomputed from stored events on reads. It is designed for small datasets, not sustained hostile traffic.
+Run with `AEGIS_ENV=production` behind a TLS reverse proxy. That requires sign-in (viewer, analyst, and admin accounts created with `python -m aegis.users`) and a 32+ character `AEGIS_SECRET_KEY`. The server is waitress; logs are JSON with request IDs. Back up with `python -m aegis.backup`, and optionally purge old raw evidence with `AEGIS_RAW_RETENTION_DAYS`. The [operations runbook](docs/OPERATIONS.md) covers network exposure, configuration, upgrades, rollback, monitoring, and dependency updates; [PERFORMANCE.md](docs/PERFORMANCE.md) has load-test results; [RELEASE_NOTES.md](RELEASE_NOTES.md) lists the changes since 1.0.
+
+## Current boundaries
+
+Aegis is a single-node service on SQLite with a 50,000-event cap (measured capacity in PERFORMANCE.md). TLS is terminated by a reverse proxy, not by Aegis. There is no automated incident response or blocking, by design.
 
 Discovery parsing recognizes simple shell command positions and ignores quoted lookalikes and interactive stdin. It is intentionally not a full shell parser and will miss some wrappers, expansions, or obfuscation.
 
 Recorded input does not prove successful command execution. Downloads do not establish malware or C2. Discovery can be benign; rule severity is priority, not a probability. ATT&CK mappings are candidates for review. Deduplication can collapse otherwise identical records sharing a timestamp. Collector rotation supports rename/create (lossless, including across restarts while the rotated file stays in the same directory) or observed truncation; copy-truncate followed by rapid regrowth can evade a size-based reset, and lines written just before a copy-truncate can be lost. The raw evidence table holds attempted passwords; protect the database file.
 
-For the current local-lab scope, the remaining validation work is independent labeled telemetry and real local-model testing. Multi-user deployment, additional sensors, adaptive deception, and malware analysis remain optional future projects rather than requirements for this release.
+The remaining validation work is independently labeled telemetry (current real-data labels are automated criteria; see REALDATA_EVALUATION.md) and real local-model testing of AI drafts. PostgreSQL, additional sensor types, adaptive deception, and malware analysis are optional future projects.
 
 ## References
 
@@ -168,6 +180,8 @@ GET endpoints are available on the local dashboard. Mutations require the dashbo
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me` | Sign in (JSON `username`, `password`), sign out, current user and role |
+| `PUT /api/v1/detection` | Admin only: validated detection settings, persisted with history and applied immediately |
 | `GET /api/health` | Service and database readiness; returns 503 on database failure |
 | `GET /api/overview?source=demo` (`demo`, `imported`, or `live`) | Dataset counts, incident queue, ruleset version, collector and storage status |
 | `GET /api/events?source=imported&q=hostname&event_type=command&session=...&sensor=...&src_ip=...&since=...&until=...` | Stable timestamp/ID ordering; page size 1–500; times are ISO 8601 with a timezone |

@@ -98,3 +98,12 @@ def test_production_server_emits_json_logs(tmp_path):
     assert any(e.get("event") == "start" and e["auth"] == "off" for e in entries)
     assert any(e.get("event") == "request" and e["path"] == "/api/overview" and e.get("request_id") for e in entries)
     assert server.returncode == 0
+
+
+def test_load_test_tool_runs_end_to_end(tmp_path):
+    from aegis import loadtest
+    result = loadtest.run(1500, tmp_path / "load")
+    assert result["events"] == 1500 and result["chain_valid"] and result["ingest"]["events_per_second"] > 0
+    assert set(result["api_latency"]) >= {"overview", "events page", "incidents", "findings", "metrics"}
+    events = loadtest.traffic(500)
+    assert all(e["src_ip"].startswith(loadtest.NETS) for e in events)  # documentation ranges only

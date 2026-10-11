@@ -313,3 +313,34 @@ Implemented, with tests:
 Verification: 137 tests and 38 fixtures pass. Six of seven mutations were caught. The seventh (removing EVE offset normalization) survived because Python 3.12 and 3.14 already parse EVE's `+0100` offsets (verified in the production image), so the normalization was dead code and was removed.
 
 Gate: "No automated block/remediation path exists by default" stays ✓ (none exists at all).
+
+---
+
+## Phase 7 progress (2026-10-11)
+
+- **7a:** accounts (Werkzeug hashing, `python -m aegis.users`), viewer/analyst/admin roles on every request, session rotation, generic and rate-limited sign-in, real actor attribution, an admin-only audited detection-settings API, rate limits, metrics token, and fail-fast production configuration. Ten security mutations each fail a test.
+- **7b:** JSON logs with request IDs (unsafe IDs replaced; no query strings, telemetry, or AI text), waitress, an optional trusted proxy, and a bind guard.
+- **7c:** online backups with manifests, read-only verification (digest, integrity, full chain, counts, sidecars), safe restore, and scheduled raw retention. Evidence edited inside a backup is caught even with a regenerated digest.
+- **7d:** hash-locked dependencies (two-week minimum age; Werkzeug 3.1.9 for CVE-2026-102598), pinned base image digest, Docker installs with `--require-hashes`, and CI (SHA-pinned actions, read-only token) with tests, pip-audit, and a Trivy image scan. Both scans pass locally; the workflow has not yet run on GitHub.
+- **7e:** load test at 50,000 events (docs/PERFORMANCE.md); a rollback rehearsal on the real 1.0 database (backup → upgrade to schema 7 → restore → the `aegis-1.0` code served it correctly); operations runbook (docs/OPERATIONS.md); release notes.
+
+## Release gate review (2026-10-11)
+
+| Specification gate (§17) | Status | Evidence |
+|---|---|---|
+| Existing behavior is mapped and regressions are covered by tests | ✓ | This audit; all 31 original tests kept passing (four deliberately versioned changes documented) |
+| Live Cowrie ingestion works from a configured source and survives restart | ✓ | Collector tests; real-server and SIGTERM subprocess tests; real honeypot logs ingested |
+| Rotation, partial lines, malformed JSON, duplicate input, and DB outages are tested | ✓ | `tests/test_ingestion.py` with mutation checks |
+| Event provenance and synthetic/live separation are visible and preserved in exports | ✓ | Raw-evidence chain, provenance dialog, evidence export schema 2, dataset-labeled CSV and reports |
+| Findings include reproducible rationale and exact evidence references | ✓ | Finding contract on every engine; fixtures |
+| Rule, statistical, and optional ML layers can fail independently | ✓ | Isolation tests for detection, statistics, and ML |
+| ML is disabled by default until evaluation supports enabling it | ✓ | `ml_enabled=false`; real-data backtest shows no gain over rules with INT-001 |
+| Authn/authz, input validation, safe rendering, rate limits, and secret handling are reviewed | ✓ | Phase 7a tests and mutations, CSRF, CSP, escaping and CSV tests, secrets only from environment; reviewed in this work, and an independent review is still recommended |
+| Database migrations, backup, and restore are tested | ✓ | v0.2 upgrade tests, backup and restore tests, rollback rehearsal with the 1.0 code |
+| Health, readiness, ingestion lag, and error metrics are available | ✓ | `/api/v1/health/*`, `/api/v1/sources`, `/api/v1/metrics` |
+| Labeled detection evaluation reports meaningful metrics and limitations | ✗ **open** | Harness, Wilson intervals, and a real-data run exist, but labels are automated criteria and there are only 6 positives; independent labels are needed |
+| Deployment uses pinned images and dependencies, least privilege, and documented network exposure | ✓ (minor) | Digest-pinned app and Cowrie images, hash locks, non-root, dropped capabilities, read-only filesystem, OPERATIONS.md. Minor: the optional Ollama image in the AWS overlay is tag-pinned |
+| No automated block or remediation path exists by default | ✓ | None exists; the response roadmap is documented |
+| Runbook, environment template, rollback plan, and release notes are complete | ✓ | OPERATIONS.md, .env.example, rollback rehearsal, RELEASE_NOTES.md |
+
+**Verdict:** one gate is open, so following the specification's release principle, Aegis 2.0 ships as **2.0.0-rc1**, not as production-ready. The blocker is independent labeled evaluation: label real sessions in the session view (the honeypot collects until 2026-10-28), export them, and rerun `python -m aegis.realdata` or `python -m aegis.labeled_eval`.
