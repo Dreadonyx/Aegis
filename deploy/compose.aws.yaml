@@ -20,7 +20,8 @@ services:
   # Shares the dashboard's network namespace, so its loopback address is
   # the dashboard's loopback address.
   ollama:
-    image: ollama/ollama:0.34.3
+    # 0.34.3 pinned by digest (registry and Docker Hub agree; pushed 2026-09-22).
+    image: ollama/ollama:0.34.3@sha256:7ab595e4ead391f6818c7215297781282babe0701f6d9a9f8862ac591360a58b
     restart: unless-stopped
     network_mode: "service:dashboard"
     depends_on: [dashboard]

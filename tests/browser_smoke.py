@@ -17,7 +17,7 @@ with sync_playwright() as p:
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.goto(url)
     if url == "http://127.0.0.1:8000":
-        page.wait_for_function("async () => (await (await fetch('/api/overview?source=imported')).json()).events > 0", timeout=10000)
+        page.wait_for_function("async () => (await (await fetch('/api/overview?source=live')).json()).events > 0", timeout=10000)
     page.locator("#replay").click()
     expect(page.locator("#metric-events")).to_have_text("18")
     expect(page.locator(".incident-item")).to_have_count(3)
@@ -66,6 +66,10 @@ with sync_playwright() as p:
     expect(page.locator("#session-dialog")).to_be_visible()
     # Newest failure is demo-benign-1: one failed login and no findings, so no suggestion is offered.
     expect(page.locator(".label-hint")).to_contain_text("needs a human decision")
+    if page.locator("#clear-label").is_enabled():  # rerun against a persistent database: start from no label
+        page.once("dialog", lambda dialog: dialog.accept())
+        page.locator("#clear-label").click()
+        expect(page.locator("#label-saved")).to_contain_text("Not saved yet")
     page.locator('#label-form input[value="benign"]').check()
     page.get_by_role("button", name="Save label").click()
     expect(page.locator("#notice")).to_have_text("Session label saved.")
@@ -90,7 +94,9 @@ with sync_playwright() as p:
     page.locator("#finding-engine").select_option("sequence")
     expect(page.locator("#finding-list .finding")).to_have_count(1)
     page.locator('[data-view="sources"]').click()
-    expect(page.locator(".source-card")).to_have_count(1)
+    expect(page.locator(".source-card", has_text="demo-replay")).to_have_count(1)
+    if url == "http://127.0.0.1:8000":  # the compose stack also runs the live Cowrie collector
+        expect(page.locator(".source-card", has_text="cowrie-live")).to_contain_text("running")
     page.locator('[data-view="rules"]').click()
     expect(page.locator(".rule-row")).to_have_count(13)
     page.locator('[data-view="lab"]').click()
