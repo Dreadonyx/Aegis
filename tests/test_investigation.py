@@ -244,3 +244,37 @@ def test_realdata_pipeline_end_to_end(tmp_path):
     assert store_labels == [("criteria-v1 (automated)",)]  # never presented as human labels
     with pytest.raises(FileExistsError):
         realdata.run([tmp_path / "logs"], tmp_path / "out", validate_config({}))
+
+
+def test_labeling_task_is_independent_and_minimal(tmp_path, client):
+    upload(client, INTRUSION + SCAN)
+    client.put("/api/v1/sessions/scan/label?source=imported", json={"label": "benign"})
+    db = client.application.extensions["store"].path
+    result = labels.task(db, "imported", tmp_path / "task")
+    assert result["sessions"] == 2
+    text = (tmp_path / "task" / "sessions.jsonl").read_text()
+    assert "hunter2" not in text and "192.0.2.70" not in text  # no passwords, no source addresses
+    assert '"uname -a"' in text and "cowrie.login.success" in text
+    instructions = (tmp_path / "task" / "INSTRUCTIONS.md").read_text()
+    assert "Never run" in instructions and not any(rule in instructions + text for rule in ("DISC-001", "INT-001", "AUTH-", "Suggested"))
+    assert labels.task(db, "imported", tmp_path / "rest", skip_labeled=True)["sessions"] == 1
+
+
+def test_importing_outside_labels_keeps_human_labels(tmp_path, client, capsys):
+    upload(client, INTRUSION + SCAN + [raw(300, "late", eventid="cowrie.login.success", username="pi")])
+    client.put("/api/v1/sessions/in/label?source=imported", json={"label": "malicious", "types": ["discovery"]})
+    db = client.application.extensions["store"].path
+    answers = tmp_path / "labels.jsonl"
+    answers.write_text("\n".join(json.dumps(x) for x in [
+        {"session": "in", "sensor": "hp", "label": "benign", "types": [], "note": "should not replace the human label"},
+        {"session": "scan", "sensor": "hp", "label": "benign", "types": [], "note": "scanner"},
+        {"session": "late", "sensor": "hp", "label": "unsure", "types": []},
+        {"session": "ghost", "sensor": "hp", "label": "benign", "types": []},
+        {"session": "scan", "sensor": "hp", "label": "evil"}, "not json"]))
+    assert labels.main(["import", str(answers), "--db", db, "--dataset", "imported", "--actor", "codex"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {"imported": 1, "unsure": 1, "kept_existing": 1, "unknown_session": 1, "invalid": 2}
+    timeline = lambda s: client.get(f"/api/v1/sessions/{s}/timeline?source=imported").get_json()["label"]
+    assert timeline("in")["label"] == "malicious" and timeline("in")["actor"] == "local-analyst"
+    assert timeline("scan")["actor"] == "codex" and timeline("late") is None
+    assert labels.main(["import", str(answers), "--db", db, "--dataset", "imported", "--actor", "bad actor!"]) == 2
