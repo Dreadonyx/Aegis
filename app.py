@@ -1,9 +1,12 @@
 import atexit
+import csv
 import hashlib
+import io
 import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
 import sqlite3
@@ -23,10 +26,26 @@ from aegis.analysis import Analyzer, load_config
 from aegis.engine import RULESET_VERSION, detect, report
 from aegis.statistics import describe
 from aegis.evaluate import evaluate
+from aegis.labels import LABEL_TYPES, redact, suggest
+from aegis.rules import session_key
 from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
 from aegis.store import TRANSITIONS, Store, TransitionError
 
 ROOT = Path(__file__).resolve().parent
+
+
+CSV_LIMIT = 10000
+# Control, bidirectional, and zero-width characters, plus tab and newlines, so a cell stays on one line.
+UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+CSV_COLUMNS = ("event_time", "dataset", "dataset_label", "sensor", "session", "src_ip", "src_port", "event_type", "eventid",
+               "username", "input", "url", "filename", "shasum", "client_version", "id")
+
+
+def csv_cell(value):
+    """Spreadsheet-safe text: visible escapes for unsafe characters and a leading quote before anything a
+    spreadsheet could read as a formula (OWASP CSV injection guidance)."""
+    text = UNSAFE_TEXT.sub(lambda m: f"\\u{ord(m.group()):04x}", "" if value is None else str(value))
+    return "'" + text if text.startswith(("=", "+", "-", "@")) else text
 
 
 DATASET_LABELS = {"demo": "synthetic replay; not observed attacks", "imported": "uploaded historical telemetry",
@@ -159,6 +178,7 @@ def create_app(database=None, detection_config=None, model_dir=None):
             rules=analyzer.catalog, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")), ruleset_version=RULESET_VERSION,
             dataset_label=DATASET_LABELS[source], detection=store.detection_state(source), storage=store.usage(),
             statistics=statistics_summary(source), ml=ml_summary(source),
+            finding_counts=store.finding_counts(source),
             collector=collector_status())
 
     @app.get("/api/events")
@@ -245,7 +265,81 @@ def create_app(database=None, detection_config=None, model_dir=None):
         result = store.session_timeline(source, session_id, text_args("sensor").get("sensor"))
         if not result["events"]:
             return jsonify(error="Session not found"), 404
-        return jsonify(session=session_id, dataset=source, **result)
+        keys = {session_key(e) for e in result["events"]}
+        label = history = hint = None
+        if len(keys) == 1:
+            label, history = store.label(source, keys.pop())
+            hint = suggest(result["events"], result["findings"])
+        return jsonify(session=session_id, dataset=source, **result, ambiguous=len({e["sensor"] for e in result["events"]}) > 1,
+                       label=label, label_history=history or [], suggestion=hint)
+
+    @app.put("/api/v1/sessions/<session_id>/label")
+    def set_session_label(session_id):
+        source = source_arg()
+        if len(session_id) > 200:
+            raise ValueError("session must be at most 200 characters")
+        events = store.session_timeline(source, session_id, text_args("sensor").get("sensor"))["events"]
+        if not events:
+            return jsonify(error="Session not found"), 404
+        if len({e["sensor"] for e in events}) > 1:
+            raise ValueError("This session ID appears on several sensors; add ?sensor=")
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get("label") not in ("malicious", "benign", None):
+            raise ValueError("label must be malicious, benign, or null to clear it")
+        types = body.get("types", [])
+        if not isinstance(types, list) or not set(types) <= set(LABEL_TYPES):
+            raise ValueError(f"types may contain only: {', '.join(LABEL_TYPES)}")
+        note = body.get("note")
+        if note is not None and (not isinstance(note, str) or len(note) > 500):
+            raise ValueError("note must be text of at most 500 characters")
+        first = events[0]
+        store.set_label(source, session_key(first), first["session"], first["sensor"], body["label"], types if body["label"] else [],
+                        note.strip() if note else None, "local-analyst")
+        label, history = store.label(source, session_key(first))
+        return jsonify(label=label, label_history=history)
+
+    @app.get("/api/v1/labels")
+    def label_list():
+        source = source_arg()
+        page, limit, offset = paging(50, 200)
+        counts, rows = store.labels(source, limit, offset)
+        return jsonify(dataset=source, counts=counts, labels=rows, page=page, limit=limit,
+                       note="Labels are analyst judgments of alert-worthiness. Export them with python -m aegis.labels export.")
+
+    @app.get("/api/v1/events/<event_id>/provenance")
+    def event_provenance(event_id):
+        source = source_arg()
+        if not re.fullmatch(r"[0-9a-f]{20}", event_id):
+            raise ValueError("Event IDs are 20 hexadecimal characters")
+        total, events = store.query_events(source, filters={"id": event_id}, limit=1)
+        if not total:
+            return jsonify(error="Event not found"), 404
+        raw = store.raw_records([event_id]).get(event_id)
+        return jsonify(event=events[0], dataset_label=DATASET_LABELS[source], provenance=store.provenance([event_id]).get(event_id, []),
+                       original=redact(raw) if raw is not None else None,
+                       note="Original record as received, with attempted passwords and login messages masked. "
+                            "Events stored before schema 2 have no original record.")
+
+    @app.get("/api/v1/events/export.csv")
+    def export_events():
+        source = source_arg()
+        query = request.args.get("q", "")
+        if len(query) > 200:
+            raise ValueError("Search text must be at most 200 characters")
+        filters = text_args("event_type", "eventid", "session", "sensor", "src_ip")
+        filters.update(since=time_arg("since"), until=time_arg("until"))
+        total, events = store.query_events(source, query, filters, CSV_LIMIT + 1, 0)
+        if total > CSV_LIMIT:
+            raise ValueError(f"{total:,} events match; narrow the filters to at most {CSV_LIMIT:,} per export")
+        out = io.StringIO()
+        writer = csv.writer(out, quoting=csv.QUOTE_ALL, lineterminator="\r\n")
+        writer.writerow(CSV_COLUMNS)
+        for e in reversed(events):
+            row = {**e, "event_time": e["timestamp"], "dataset": source, "dataset_label": DATASET_LABELS[source]}
+            writer.writerow([csv_cell(row.get(c)) for c in CSV_COLUMNS])
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return Response(out.getvalue(), mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="aegis-{source}-events-{stamp}.csv"'})
 
     @app.get("/api/v1/detection")
     def detection_settings():

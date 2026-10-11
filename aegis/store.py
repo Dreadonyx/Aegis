@@ -160,6 +160,30 @@ MIGRATIONS.append((5, "ML scoring state", [
 ]))
 SIGNAL_TABLES = {"statistical": "stats_state", "ml": "ml_state"}
 
+MIGRATIONS.append((6, "Analyst session labels with history", [
+    """CREATE TABLE session_labels(
+        dataset TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        session TEXT NOT NULL,
+        sensor TEXT NOT NULL,
+        label TEXT NOT NULL CHECK(label IN ('malicious', 'benign')),
+        types TEXT NOT NULL,
+        note TEXT,
+        actor TEXT NOT NULL,
+        labeled_at TEXT NOT NULL,
+        PRIMARY KEY(dataset, session_key))""",
+    """CREATE TABLE session_label_history(
+        id INTEGER PRIMARY KEY,
+        dataset TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        changed_at TEXT NOT NULL,
+        before_value TEXT,
+        after_value TEXT)""",
+    "CREATE INDEX session_label_history_key ON session_label_history(dataset, session_key, id)",
+]))
+LABEL_TYPES = ("credential_access", "discovery", "transfer", "intrusion_sequence", "anomaly")
+
 RANK = {"low": 1, "medium": 2, "high": 3}
 # Validated workflow. Closed cases (resolved, false_positive) are reopened before changing outcome.
 TRANSITIONS = {
@@ -624,7 +648,7 @@ class Store:
         if q:
             where.append("body LIKE ? ESCAPE '\\'")
             args.append("%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
-        for column in ("event_type", "eventid", "session", "sensor", "src_ip"):
+        for column in ("id", "event_type", "eventid", "session", "sensor", "src_ip"):
             if (filters or {}).get(column):
                 where.append(f"{column}=?")
                 args.append(filters[column])
@@ -662,6 +686,59 @@ class Store:
         findings = [f for f in candidates if ids & set(f["evidence_event_ids"])]
         return dict(events=events[:limit], truncated=len(events) > limit, findings=findings,
                     incident_ids=sorted({f.get("incident_id") for f in findings} - {None}))
+
+    # --- Analyst labels ----------------------------------------------------------------------
+
+    def label(self, dataset, session_key):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute("SELECT * FROM session_labels WHERE dataset=? AND session_key=?", (dataset, session_key)).fetchone()
+            history = [dict(r) for r in db.execute("SELECT actor, changed_at, before_value, after_value FROM session_label_history "
+                                                   "WHERE dataset=? AND session_key=? ORDER BY id DESC", (dataset, session_key))]
+        label = dict(row) if row else None
+        if label:
+            label["types"] = json.loads(label["types"])
+        for h in history:
+            h["before"], h["after"] = (json.loads(h.pop(k)) if h.get(k) else None for k in ("before_value", "after_value"))
+        return label, history
+
+    def set_label(self, dataset, session_key, session, sensor, label, types, note, actor):
+        """Set or clear (label=None) one session's label; every change is kept in the history."""
+        now = utcnow()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT label, types, note FROM session_labels WHERE dataset=? AND session_key=?", (dataset, session_key)).fetchone()
+            before = {"label": row[0], "types": json.loads(row[1]), "note": row[2]} if row else None
+            after = {"label": label, "types": sorted(types), "note": note} if label else None
+            if before == after:
+                return
+            if after:
+                db.execute("""INSERT INTO session_labels VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(dataset, session_key) DO UPDATE SET
+                    label=excluded.label, types=excluded.types, note=excluded.note, actor=excluded.actor, labeled_at=excluded.labeled_at""",
+                    (dataset, session_key, session, sensor, label, json.dumps(sorted(types)), note, actor, now))
+            else:
+                db.execute("DELETE FROM session_labels WHERE dataset=? AND session_key=?", (dataset, session_key))
+            db.execute("INSERT INTO session_label_history(dataset, session_key, actor, changed_at, before_value, after_value) VALUES (?,?,?,?,?,?)",
+                       (dataset, session_key, actor, now, json.dumps(before) if before else None, json.dumps(after) if after else None))
+
+    def labels(self, dataset, limit=None, offset=0):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            counts = dict(db.execute("SELECT label, count(*) FROM session_labels WHERE dataset=? GROUP BY label", (dataset,)).fetchall())
+            page = f" LIMIT {int(limit)} OFFSET {int(offset)}" if limit else ""
+            rows = [dict(r) for r in db.execute(f"SELECT * FROM session_labels WHERE dataset=? ORDER BY labeled_at DESC, session_key{page}", (dataset,))]
+        for r in rows:
+            r["types"] = json.loads(r["types"])
+        return {"malicious": counts.get("malicious", 0), "benign": counts.get("benign", 0)}, rows
+
+    def raw_records(self, event_ids):
+        """Original record bytes per event (first record when several map to one event). Callers redact."""
+        found = {}
+        with self.connect() as db:
+            for part in chunks(sorted(set(event_ids))):
+                for event_id, raw in db.execute(f"SELECT event_id, raw FROM raw_events WHERE event_id IN ({marks(part)}) ORDER BY seq", part):
+                    found.setdefault(event_id, raw)
+        return found
 
     def provenance(self, event_ids):
         """Raw-evidence provenance per event (never the raw bytes)."""

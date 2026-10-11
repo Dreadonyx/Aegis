@@ -8,6 +8,11 @@ missing, tampered, stale, or incompatible model yields no ML output and a record
     python -m aegis.ml train --db data/aegis.sqlite3 --dataset live --until 2026-10-20T00:00:00Z --out models/live-2026-10-20
     python -m aegis.ml train --labeled path/to/dataset --benign-only --out models/labeled-v1
     python -m aegis.ml inspect models/live-2026-10-20
+    python -m aegis.ml calibrate --model models/live-2026-10-20 --labeled datasets/live-2026-10-28 \
+        --test-after 2026-10-20T00:00:00Z --objective f1 --out models/live-2026-10-20-cal
+
+Use three time-ordered windows: train on the first, calibrate the threshold on the second, and measure on
+the third (python -m aegis.labeled_eval --test-after <end of calibration window> --model ...).
 
 The score is -IsolationForest.score_samples (higher is more unusual). It is not a probability; the facts
 state how a session ranks against the training sessions instead."""
@@ -205,6 +210,78 @@ def compute(events, config, model_dir, cache=None):
             "scored_sessions": len(rows), "model": {k: model.manifest[k] for k in ("model_version", "trained_at", "feature_version", "threshold", "training")}}
 
 
+def _point(threshold, scores, positives):
+    flagged = {key for key, score in scores.items() if score > threshold}
+    tp, fp = len(flagged & positives), len(flagged - positives)
+    fn, tn = len(positives - flagged), len(set(scores) - flagged - positives)
+    precision = tp / (tp + fp) if tp + fp else None
+    recall = tp / (tp + fn) if tp + fn else None
+    f1 = 2 * precision * recall / (precision + recall) if precision and recall else 0.0
+    return {"threshold": round(threshold, 6), "flagged": len(flagged), "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": None if precision is None else round(precision, 4), "recall": None if recall is None else round(recall, 4),
+            "f1": round(f1, 4), "false_positive_rate": round(fp / (fp + tn), 4) if fp + tn else None}
+
+
+def calibrate(model_dir, labeled_dir, out_dir, config, test_after=None, objective="f1", allow_overlap=False):
+    """Choose a threshold on labeled sessions from after the training window and write a new model version.
+    The original model is never modified."""
+    from aegis import labeled_eval
+    joblib, numpy, sklearn, _ = _libraries()
+    model = load(model_dir, config["ml_max_model_age_days"])
+    data_manifest, events, rejected, labels, files = labeled_eval.load(labeled_dir)
+    by_key = {(label.get("sensor"), label["session"]): label for label in labels}
+    label_of = lambda r: by_key.get((r["sensor"], r["session"])) or by_key.get((None, r["session"]))
+    rows = [r for r in session_features(events, config) if label_of(r) and (test_after is None or r["first_seen"] >= test_after)]
+    trained = model.manifest["training"]
+    overlap = (trained.get("files_sha256", {}).get("events.jsonl") == files["events.jsonl"]) or \
+              bool(trained.get("until") and any(r["first_seen"] < trained["until"] for r in rows))
+    if overlap and not allow_overlap:
+        raise ValueError(f"Calibration sessions overlap the training window (training ends {trained.get('until')}). "
+                         "Pass --test-after at or after the training end, or --allow-overlap to accept an optimistic threshold.")
+    positives = {r["session_key"] for r in rows if label_of(r)["label"] == "malicious"}
+    if not positives or len(positives) == len(rows):
+        raise ValueError("Calibration needs both malicious and benign labeled sessions in the window")
+    scores = {r["session_key"]: s["score"] for r, s in zip(rows, model.score(rows))}
+    ordered = sorted(set(scores.values()))
+    candidates = [ordered[0] - 1e-6] + [(a + b) / 2 for a, b in zip(ordered, ordered[1:])] + [ordered[-1]]
+    curve = [_point(t, scores, positives) for t in candidates]
+    kind, _, target = objective.partition(":")
+    if kind == "f1" and not target:
+        eligible, rank = curve, lambda p: (p["f1"], p["threshold"])
+    elif kind in ("precision", "recall") and target:
+        goal = float(target)
+        other = "recall" if kind == "precision" else "precision"
+        eligible = [p for p in curve if p[kind] is not None and p[kind] >= goal]
+        rank = lambda p: (p[other] or 0, p["threshold"])
+    else:
+        raise ValueError("objective must be f1, precision:<0-1>, or recall:<0-1>")
+    if not eligible:
+        raise ValueError(f"No threshold reaches {objective} on this calibration set")
+    chosen = max(eligible, key=rank)
+    bundle = joblib.load(Path(model_dir) / "model.joblib")  # verified by load() above
+    quantile = round(bisect.bisect_right(bundle["training_scores"], chosen["threshold"]) / len(bundle["training_scores"]), 6)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=False)
+    calibrated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    bundle["core"] = core_fields(FEATURE_VERSION, quantile, chosen["threshold"], model.manifest["trained_at"], bool(trained.get("synthetic")))
+    joblib.dump(bundle, out / "model.joblib")
+    digest = sha256_file(out / "model.joblib")
+    warnings = []
+    if len(positives) < 20:
+        warnings.append(f"Only {len(positives)} malicious sessions; the chosen threshold is unstable.")
+    if overlap:
+        warnings.append("Calibration overlapped the training window (--allow-overlap); expect optimistic results.")
+    manifest = {**model.manifest, "model_version": f"if-{calibrated_at[:10]}-{digest[:8]}", "model_sha256": digest,
+                "threshold": {"quantile": quantile, "score": chosen["threshold"],
+                              "meaning": f"Calibrated for {objective} on labeled sessions; flags sessions scoring above it."},
+                "calibration": {"calibrated_from": model.manifest["model_version"], "calibrated_at": calibrated_at, "objective": objective,
+                                "dataset": f"{data_manifest.get('name')} v{data_manifest.get('version')}", "files_sha256": files,
+                                "test_after": test_after, "sessions": len(rows), "malicious": len(positives), "chosen": chosen,
+                                "curve": curve if len(curve) <= 200 else curve[::max(1, len(curve) // 200)], "warnings": warnings}}
+    (out / "model.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
 def _rows_from_db(path, dataset, since, until, config):
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -246,12 +323,25 @@ def main(argv=None):
     t.add_argument("--threshold-quantile", type=float, default=0.99)
     t.add_argument("--config", help="Detection settings JSON")
     t.add_argument("--out", required=True, help="New directory for model.joblib and model.json")
+    c = commands.add_parser("calibrate", help="Choose a threshold on labeled sessions after the training window")
+    c.add_argument("--model", required=True)
+    c.add_argument("--labeled", required=True)
+    c.add_argument("--test-after", help="Only use labeled sessions starting at or after this ISO 8601 time")
+    c.add_argument("--objective", default="f1", help="f1 (default), precision:0.9, or recall:0.8")
+    c.add_argument("--allow-overlap", action="store_true")
+    c.add_argument("--config")
+    c.add_argument("--out", required=True)
     i = commands.add_parser("inspect", help="Verify a model and print its manifest")
     i.add_argument("model_dir")
     i.add_argument("--config")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "calibrate":
+            result = calibrate(args.model, args.labeled, args.out, config, _utc(args.test_after, "--test-after") if args.test_after else None,
+                               args.objective, args.allow_overlap)
+            print(json.dumps({"model_version": result["model_version"], "calibration": {k: v for k, v in result["calibration"].items() if k != "curve"}}, indent=2))
+            return 0
         if args.command == "inspect":
             model = load(args.model_dir, config["ml_max_model_age_days"])
             print(json.dumps({**model.manifest, "verified": True}, indent=2))

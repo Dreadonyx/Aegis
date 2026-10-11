@@ -1434,3 +1434,188 @@ dialog pre {
   background:#f4f1ea;
   color:#6b5a3e
 }
+
+/* Phase 5: investigation views */
+.detection-strip {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  margin:0 0 14px;
+  font-size:11px;
+  color:var(--muted)
+}
+.strip-item {
+  border:1px solid var(--line);
+  background:white;
+  border-radius:12px;
+  padding:3px 10px;
+  font:inherit;
+  color:#34495a;
+  cursor:pointer
+}
+.strip-item strong {
+  font-size:12px
+}
+.strip-note {
+  margin-left:auto
+}
+.filter-bar {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  padding:0 18px 14px;
+  font-size:11px
+}
+.filter-bar input, .filter-bar select, .filter-inline select {
+  font:inherit;
+  font-size:11px;
+  padding:6px 8px;
+  border:1px solid var(--line);
+  border-radius:4px;
+  background:white;
+  max-width:100%
+}
+.filter-bar label {
+  display:flex;
+  gap:6px;
+  align-items:center;
+  color:var(--muted)
+}
+.filter-inline {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap
+}
+.session-link {
+  font:inherit;
+  font-size:inherit;
+  color:#466f96;
+  background:none;
+  border:0;
+  padding:0;
+  cursor:pointer;
+  text-decoration:underline dotted
+}
+.dialog-actions {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin:10px 0
+}
+.provenance {
+  display:grid;
+  grid-template-columns:max-content 1fr;
+  gap:4px 12px;
+  font-size:11px;
+  margin:6px 0 12px
+}
+.provenance dt {
+  color:var(--muted)
+}
+.provenance dd, .mono {
+  word-break:break-all
+}
+#event-original {
+  border-left:2px solid #b9a36b
+}
+#session-dialog {
+  width:min(900px, calc(100vw - 32px))
+}
+.session-meta {
+  display:flex;
+  flex-wrap:wrap;
+  gap:16px;
+  font-size:11px;
+  color:var(--muted);
+  margin-bottom:12px
+}
+.label-box {
+  background:#f5f8fb;
+  border-radius:6px;
+  padding:12px 14px;
+  margin:10px 0
+}
+.label-hint {
+  font-size:11px;
+  line-height:1.6;
+  color:#34495a
+}
+.label-choice, .label-types {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px 16px;
+  font-size:11px;
+  margin:8px 0
+}
+#label-form input[name="note"] {
+  width:100%;
+  font:inherit;
+  font-size:11px;
+  padding:6px 8px;
+  border:1px solid var(--line);
+  border-radius:4px;
+  box-sizing:border-box
+}
+.history {
+  font-size:10px;
+  color:var(--muted);
+  padding-left:16px;
+  line-height:1.7
+}
+.finding-row {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  font-size:11px;
+  margin:6px 0
+}
+.finding-top {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px
+}
+.finding-top .incident-time {
+  margin-left:auto
+}
+.finding.statistical, .finding.ml {
+  border-left-color:#b9a36b;
+  background:#fbfaf6
+}
+.finding-limit {
+  color:var(--muted);
+  font-size:10px
+}
+#finding-list {
+  padding:0 18px
+}
+.sources-note {
+  font-size:11px;
+  margin:0 0 12px
+}
+.source-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap:14px
+}
+.source-card dl {
+  display:grid;
+  grid-template-columns:max-content 1fr;
+  gap:5px 12px;
+  font-size:11px;
+  padding:0 18px 14px;
+  margin:0
+}
+.source-card dt {
+  color:var(--muted)
+}
+.source-card dd {
+  margin:0;
+  word-break:break-word
+}
+.source-card .section-label, .source-card .history {
+  padding:0 18px
+}
