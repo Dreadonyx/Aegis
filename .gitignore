@@ -15,3 +15,6 @@ htmlcov/
 # Trained models: pickles derived from attacker telemetry. Mount them; never commit or bake them in.
 models/
 *.joblib
+
+# Labeled exports contain attacker addresses and original records. Never commit.
+datasets/

@@ -156,7 +156,18 @@ def window_counts(rows, label_of, low, high):
     return tally
 
 
-def run(paths, out_dir, config=None, train_frac=0.5, cal_frac=0.25, objective="f1", notes=()):
+def load_labels(db_path, dataset="imported"):
+    """Labels from an Aegis database (analysts or outside labelers), keyed by (sensor, session)."""
+    import sqlite3
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = db.execute("SELECT sensor, session, label, types, actor FROM session_labels WHERE dataset=?", (dataset,)).fetchall()
+    finally:
+        db.close()
+    return {(sensor, session): (label, json.loads(types), actor) for sensor, session, label, types, actor in rows}
+
+
+def run(paths, out_dir, config=None, train_frac=0.5, cal_frac=0.25, objective="f1", notes=(), provided=None):
     config = config or load_config()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=False)
@@ -172,12 +183,19 @@ def run(paths, out_dir, config=None, train_frac=0.5, cal_frac=0.25, objective="f
     by_session = {}
     for e in events:
         by_session.setdefault(session_key(e), []).append(e)
-    decisions = {key: criteria_label(items) for key, items in by_session.items()}
+    if provided is None:
+        decisions = {key: criteria_label(items) for key, items in by_session.items()}
+        actors = {key: f"criteria-v{CRITERIA_VERSION} (automated)" for key in decisions}
+    else:
+        decisions, actors = {}, {}
+        for key, items in by_session.items():
+            label, types, actor = provided.get((items[0]["sensor"], items[0]["session"]), (None, [], None))
+            decisions[key], actors[key] = (label, types, "provided label" if label else "unlabeled"), actor
     for key, (label, types, _) in decisions.items():
         if label:
             first = by_session[key][0]
-            store.set_label("imported", key, first["session"], first["sensor"], label, types, f"criteria v{CRITERIA_VERSION}",
-                            f"criteria-v{CRITERIA_VERSION} (automated)")
+            store.set_label("imported", key, first["session"], first["sensor"], label, types,
+                            f"criteria v{CRITERIA_VERSION}" if provided is None else "provided", actors[key])
     rows = session_features(events, config)
     label_of = lambda r: decisions[r["session_key"]][0]
     if sum(label_of(r) == "malicious" for r in rows) < 2:
@@ -223,7 +241,9 @@ def run(paths, out_dir, config=None, train_frac=0.5, cal_frac=0.25, objective="f
         "data": {"files": [f.name for f in files], "ingestion": ingestion, "events": len(events), "sessions": len(rows),
                  "span": [events[0]["timestamp"], events[-1]["timestamp"]], "sensors": sorted({e["sensor"] for e in events}),
                  "dataset_sha256": overall["files_sha256"]},
-        "labels": {"method": f"behavioral criteria v{CRITERIA_VERSION}, automated (not independent human review)", "criteria": CRITERIA,
+        "labels": {"method": f"behavioral criteria v{CRITERIA_VERSION}, automated (not independent human review)" if provided is None else
+                   "provided labels: " + ", ".join(f"{n} by {a}" for a, n in sorted(__import__("collections").Counter(a for a in actors.values() if a and a != "unlabeled").items())),
+                   "criteria": CRITERIA if provided is None else None,
                    "counts": window_counts(rows, label_of, None, None)},
         "split": {"method": "session start time; train, calibration, test by session count", "calibration_start": cal_start, "test_start": test_start,
                   "train": window_counts(rows, label_of, None, cal_start), "calibration": window_counts(rows, label_of, cal_start, test_start),
@@ -237,8 +257,9 @@ def run(paths, out_dir, config=None, train_frac=0.5, cal_frac=0.25, objective="f
     }
     lim = report["limitations"]
     lim.extend(notes)
-    lim.append("Labels come from automated behavioral criteria, not independent analysts. The criteria overlap what the rules detect, so rule "
-               "metrics are optimistic; treat them as agreement with the criteria, not field accuracy.")
+    if provided is None:
+        lim.append("Labels come from automated behavioral criteria, not independent analysts. The criteria overlap what the rules detect, so rule "
+                   "metrics are optimistic; treat them as agreement with the criteria, not field accuracy.")
     n_mal = report["labels"]["counts"]["malicious"]
     lim.append(f"Only {n_mal} malicious sessions in total and {len(malicious_test)} in the test window: confidence intervals are wide and a "
                "single session changes the metrics substantially.")
@@ -272,7 +293,7 @@ def markdown(r):
              f"- Span: {r['data']['span'][0]} to {r['data']['span'][1]}",
              f"- Ingestion: {r['data']['ingestion']['inserted']} stored, {r['data']['ingestion']['duplicates']} duplicates, {r['data']['ingestion']['rejected']} rejected",
              "", "## Labels", f"Method: {r['labels']['method']}.", ""]
-    lines += [f"- **{k}**: " + "; ".join(v) for k, v in r["labels"]["criteria"].items()]
+    lines += [f"- **{k}**: " + "; ".join(v) for k, v in (r["labels"]["criteria"] or {}).items()]
     lc = r["labels"]["counts"]
     lines += ["", f"Counts: {lc['malicious']} malicious, {lc['benign']} benign, {lc['excluded']} excluded.", "",
               "## Time split", "| Window | Starts | Sessions | Malicious | Benign | Excluded |", "|---|---|---|---|---|---|"]
@@ -314,9 +335,11 @@ def main(argv=None):
     parser.add_argument("--config")
     parser.add_argument("--objective", default="f1")
     parser.add_argument("--note", action="append", default=[], help="Add a limitation to the report (repeatable)")
+    parser.add_argument("--labels-db", help="Use labels from this Aegis database (imported dataset) instead of the automated criteria")
     args = parser.parse_args(argv)
     try:
-        report = run(args.logs, args.out, load_config(args.config), objective=args.objective, notes=args.note)
+        provided = load_labels(args.labels_db) if args.labels_db else None
+        report = run(args.logs, args.out, load_config(args.config), objective=args.objective, notes=args.note, provided=provided)
     except (ValueError, OSError, ml.ModelUnavailable) as error:
         print(f"Evaluation failed: {error}", file=sys.stderr)
         return 2

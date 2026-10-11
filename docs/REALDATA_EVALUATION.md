@@ -1,4 +1,57 @@
-# Real-data evaluation, 2026-10-11
+# Real-data evaluation
+
+## Final evaluation with independent labels (2026-10-11)
+
+This supersedes the criteria-labeled results further down. It contains aggregate figures only: no attacker addresses or sensor identifiers.
+
+**Labels:** 177 real sessions (460 events, 2026-10-09 to 2026-10-11 09:36 UTC).
+- 175 were labeled by **Codex**, a separate AI model. It worked from a self-contained task folder with session behavior only, no addresses or passwords, and no access to Aegis's rules or suggestions.
+- 1 was labeled by the human analyst.
+- 1 was marked "unsure" (a scanner that sent a malformed SSH packet) and excluded.
+
+Result: **11 malicious** (every session with an accepted login) and **165 benign** (scanners). A consistency check found every login session labeled malicious with types matching its behavior, every scanner labeled benign, and Codex agreeing with the analyst's label on the overlapping pattern.
+
+**Method:** a forward-chaining backtest. After the first 60 sessions, each block of 25 is scored by an Isolation Forest trained only on earlier sessions; its threshold comes from the model default or from earlier sessions' labels only. Rules are scored on the same 117 out-of-sample sessions (10 malicious). The headline uses the rules as they stood before any real data was seen (INT-001 off). Brackets are 95% Wilson intervals.
+
+| Detector (117 unseen sessions, 10 attacks) | Recall | Precision | False alarms | Accuracy |
+|---|---|---|---|---|
+| Rules and sequences (frozen) | 0.20 [0.06–0.51] | 1.00 [0.34–1.00] | 0 / 107 | 93.2% |
+| ML, default threshold | 0.10 [0.02–0.40] | 1.00 [0.21–1.00] | 0 / 107 | 92.3% |
+| **ML, threshold from earlier labels** | **0.70 [0.40–0.89]** | **0.88 [0.53–0.98]** | 1 / 107 | 96.6% |
+| **Rules OR ML (earlier labels)** | **0.80 [0.49–0.94]** | **0.89 [0.56–0.98]** | **1 / 107** | **97.4%** |
+| Rules including INT-001 (in-sample) | 0.50 [0.24–0.76] | 1.00 [0.57–1.00] | 0 / 107 | 95.7% |
+| *Never alert (baseline)* | *0* | *n/a* | *0* | *91.5%* |
+
+All 176 labeled sessions, frozen rules: recall 3/11 (0.27), precision 1.00, 0 false alarms out of 165. With INT-001 (in-sample): 6/11.
+
+### What this shows
+
+1. **Rules are precise but narrow.** No false alarm in any configuration, but the frozen rules caught only 2 of 10 attacks. Every attack here is a login; the rules alert on logins only after failed attempts (which this permissive sensor never records), on specific discovery commands, or on transfers.
+2. **Real-data ML adds the most, once its threshold is calibrated.** Trained on real sessions only, with each threshold set from earlier labels, it caught 7 of 10, including 6 the frozen rules missed, at the cost of one false alarm. With its default threshold (the training 99th percentile) it caught only 1 of 10: calibration, not the model, makes the difference.
+3. **Rules and ML complement each other.** Together they caught 8 of 10. The SCP upload that ML scored just under its threshold was caught by XFER-002.
+4. **Still missed:** two bots that logged in and disconnected immediately, which no rule covers and ML scored just below threshold. Alerting on any accepted honeypot login is the obvious candidate rule, but it was not added here, because tuning to this data would make its score in-sample. Test it on the next collection.
+5. **The one false alarm** was a connection that sent nothing (not even an SSH version) and stayed silent for 32 seconds before closing: unusual among the scanners, and arguably worth a look.
+
+### Limits
+
+- The labels are a separate AI's judgments plus one human label, not full human review. Spot-checking the 11 malicious sessions in the session view would strengthen them.
+- There are only 10 or 11 attacks, so every interval is wide; one session moves recall by 10 points.
+- One sensor and two days of traffic from a permissive Cowrie configuration.
+- INT-001 was designed after seeing this data.
+
+### Deployable real-data model
+
+`if-2026-10-11-8478a3fe` was trained on the 87 real sessions before 2026-10-10 12:00 UTC (no synthetic data), and its threshold (0.646) was calibrated for F1 on the 90 labeled sessions after that time (7 malicious). On that calibration set it scored 7/7 with no false alarms, but the threshold was chosen on those same sessions, so that is not an accuracy estimate; the backtest above is. It is kept locally in `models/real-calibrated-2026-10-11/` (not committed). Enable it with `"ml_enabled": true` and `AEGIS_ML_MODEL_DIR` pointing at that folder.
+
+### Recommendation
+
+- For this sensor, rules plus real-data ML with a label-calibrated threshold is the best measured combination. Enable it per deployment only after `python -m aegis.ml calibrate` on labeled data from after the training window. The default stays off, as the specification requires, until a larger labeled sample confirms these numbers.
+- Keep labeling as data arrives, and measure INT-001 and an accepted-login rule on sessions collected after 2026-10-11.
+
+---
+
+# Earlier result: automated criteria labels (2026-10-11)
+
 
 The first measurement of Aegis 2.0 detection and ML on real honeypot traffic. It contains aggregate figures only: no attacker addresses, session IDs, or sensor identifiers. Reproduce it with:
 

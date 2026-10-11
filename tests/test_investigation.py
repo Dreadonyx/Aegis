@@ -278,3 +278,17 @@ def test_importing_outside_labels_keeps_human_labels(tmp_path, client, capsys):
     assert timeline("in")["label"] == "malicious" and timeline("in")["actor"] == "local-analyst"
     assert timeline("scan")["actor"] == "codex" and timeline("late") is None
     assert labels.main(["import", str(answers), "--db", db, "--dataset", "imported", "--actor", "bad actor!"]) == 2
+
+
+def test_realdata_can_score_against_provided_labels(tmp_path):
+    pytest.importorskip("sklearn")
+    from aegis import realdata
+    records, truth = scanner_and_intruders(0, 140, {20, 70, 100, 130}, 5)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "cowrie.json").write_bytes(jsonl(records))
+    provided = {("hp", s): (l, [], "codex") for s, l in truth.items() if s != "s0-0"}  # one session left unlabeled
+    report = realdata.run([logs], tmp_path / "out", validate_config({}), provided=provided)
+    assert report["labels"]["method"] == "provided labels: 139 by codex" and report["labels"]["criteria"] is None
+    assert report["labels"]["counts"]["excluded"] == 1 and report["labels"]["counts"]["malicious"] == 4
+    assert not any("automated behavioral criteria" in item for item in report["limitations"])

@@ -33,7 +33,7 @@ Behavior changes:
 
 ## Open gate
 
-**Labeled detection evaluation.** The harness and a first real-data measurement exist (`docs/REALDATA_EVALUATION.md`), but its labels come from automated criteria and contain only 6 alert-worthy sessions. Closing this gate needs independently labeled real telemetry: label sessions in the session view and export them with `python -m aegis.labels export`.
+**Labeled detection evaluation (partly closed).** 177 real sessions now carry independent labels: 175 from a separate AI model with no access to the rules, and 1 from the analyst. On 117 unseen sessions, rules OR calibrated real-data ML caught 8 of 10 attacks with 1 false alarm (recall 0.80, 95% CI 0.49–0.94); see `docs/REALDATA_EVALUATION.md`. Fully closing this gate needs human verification of the labels and a larger sample.
 
 ## Known limitations
 
