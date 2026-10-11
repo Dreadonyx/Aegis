@@ -55,8 +55,8 @@ with sync_playwright() as p:
     page.locator('[data-view="lab"]').click()
     page.locator("#validate").click()
     expect(page.locator(".evaluation-grid")).to_be_visible()
-    expect(page.locator("#check-summary")).to_have_text("31 / 31 passed")
-    expect(page.locator("#check-results .check-row")).to_have_count(31)
+    expect(page.locator("#check-summary")).to_have_text("33 / 33 passed")
+    expect(page.locator("#check-results .check-row")).to_have_count(33)
     expect(page.locator("#baseline-results .check-row")).to_have_count(4)  # cold start shown per metric
     expect(page.locator("#stats-status")).to_contain_text("cold start")
     expect(page.locator("#metric-events")).to_have_text("18")
@@ -78,4 +78,4 @@ with sync_playwright() as p:
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Mobile page overflows"
     assert not errors, errors
     browser.close()
-print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, 31 regression checks, cold-start baselines, import and control-character escaping, mobile layout.")
+print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, 33 regression checks, cold-start baselines, import and control-character escaping, mobile layout.")

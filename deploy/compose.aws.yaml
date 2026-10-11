@@ -12,6 +12,8 @@ services:
       AEGIS_OLLAMA_TIMEOUT: "240"
   cowrie:
     restart: unless-stopped
+    environment:
+      COWRIE_HONEYPOT_SENSOR_NAME: aws-honeypot-01
     ports:
       - "22:2222"
     networks: [honeypot]

@@ -42,7 +42,7 @@ A honeypot sees a small, biased slice of attacker behavior, so statistics here a
 | STAT-001 | events per sensor per bucket (`stats_bucket_seconds`) | that sensor's previous `stats_baseline_buckets` buckets, zero-filled between its first and last bucket; needs `stats_min_baseline` |
 | STAT-002 | distinct usernames one source tried per bucket | peer (source, bucket) values from the preceding `stats_peer_window_seconds`; needs `stats_peer_min` peers |
 | STAT-003 | shell commands per session | peer sessions with commands from the preceding peer window |
-| STAT-004 | session duration (`duration_ms` from Cowrie's session close) | peer sessions with a duration from the preceding peer window |
+| STAT-004 | duration (`duration_ms`) of a session with an accepted login | peer logged-in sessions from the preceding peer window; scanner sessions are excluded (on real data, 137 of 146 sessions were scanners and half lasted 0 ms, which made every interactive session look extreme) |
 
 **Method.** Robust z = (observed − median) / scale, where scale = 1.4826 × MAD. When more than half the baseline is identical (MAD = 0), the scale falls back to 1.2533 × mean absolute deviation; if every baseline value is identical, a floor of 1.0 applies. The facts record which (`scale_source`). An alert needs z ≥ `stats_z_threshold` (default 3.5) **and** an absolute excess over the median of at least 20 events, 5 usernames, 10 commands, or 300,000 ms. The excess guard stops tiny absolute changes in quiet datasets from alerting.
 

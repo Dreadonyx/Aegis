@@ -212,7 +212,7 @@ def test_paginated_search_has_no_missing_events(client):
 
 def test_evaluation_does_not_mutate_dataset(client):
     result = client.get("/api/evaluation").get_json()
-    assert result["passed"] == result["total"] == 31
+    assert result["passed"] == result["total"] == 33
     assert client.get("/api/overview").get_json()["events"] == 0
 
 

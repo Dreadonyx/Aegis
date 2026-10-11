@@ -241,3 +241,19 @@ Verification: 97 tests and 31 evaluation fixtures pass. Ten deliberate mutations
 Gate change: "Rule, statistical and optional ML layers can fail independently without stopping core ingestion" → ◐ (rules and statistics verified independent; ML not built). "Labeled detection evaluation reports meaningful metrics and limitations" → ◐ (harness done; no real labeled dataset yet).
 
 Open: real labeled data (user offered to help: honeypot collection and/or a labeled dataset) is needed before any accuracy claim, and before Phase 4 ML can be validated.
+
+---
+
+## Real-data validation (2026-10-11)
+
+First run of 2.0 against real telemetry: the AWS honeypot's raw Cowrie 3.1.1 logs, 387 events from 2026-10-09 to 2026-10-11, downloaded from the retained S3 log bucket into gitignored `data/`. There are no labels, so this checks parsing and behavior, not accuracy.
+
+- Parsing: 387/387 events accepted, 0 rejected, 387 distinct IDs; every documented field the canonical layer maps was captured (`duration_ms` on all 146 session closes).
+- Detection on real activity: one session's login, discovery command, and download fused into one incident (`SEQ-001`, `DISC-001`, `XFER-001`); an SCP/SFTP upload was caught by `XFER-002`, which 1.0 did not have.
+- Real data contradicted assumptions twice, and both are fixed:
+  - **Sensor identity.** With `sensor_name` unset, Cowrie 3.1.1 logs the container ID, not the server IP the upstream config comment describes. I verified this with the pinned image in a throwaway container. The ID changes on every recreate and would split baselines. `COWRIE_HONEYPOT_SENSOR_NAME` is now set (`ssh-lab-01` locally, `aws-honeypot-01` on AWS), also verified in the image.
+  - **STAT-004 calibration.** 137 of 146 sessions were scanners and half of all sessions lasted 0 ms, so every interactive session scored z ≈ 176. Duration is now judged only among sessions with an accepted login; on this data that is 9 sessions, so it correctly reports an insufficient baseline.
+- Deployment observation (not changed): the sensor logged 9 accepted logins and **zero** failed logins, because Cowrie's user database accepts most credentials. AUTH-001, AUTH-002, and SEQ-002 cannot fire on this sensor until the user database is made stricter. That is an operator choice, documented here, not altered.
+- Scanners send HTTP requests and TLS bytes as SSH client versions. These are kept as observed and shown escaped in the UI; a regression test uses the same shapes.
+
+The deployed 1.0 honeypot was not modified. The sensor-name fix applies to future deployments.

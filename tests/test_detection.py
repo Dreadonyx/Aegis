@@ -278,3 +278,13 @@ def test_imported_report_has_no_synthetic_disclaimer_and_marks_weak_links(client
     text = client.get(f"/api/incidents/{incident['id']}/report?source=imported").text
     assert "synthetic" not in text.lower()
     assert "address-linked" in text and "does not establish a single actor" in text
+
+
+def test_real_world_client_version_shapes():
+    # Shapes seen on the AWS honeypot: scanners send HTTP or TLS bytes where an SSH version belongs.
+    http = ev(eventid="cowrie.client.version", version="GET / HTTP/1.1")
+    binary = ev(eventid="cowrie.client.version", version="\x16\x03\x01\x02\x00\x01")
+    assert http["client_version"] == "GET / HTTP/1.1"
+    assert binary["client_version"] == "\x16\x03\x01\x02\x00\x01"  # kept as observed; the UI shows control characters escaped
+    assert "client_version" not in ev(eventid="cowrie.client.version", version="")
+    assert "uuid" not in ev(eventid="cowrie.session.connect", uuid="00000000-0000-4000-8000-000000000000")  # undocumented field stays in raw evidence only

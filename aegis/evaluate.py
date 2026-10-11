@@ -81,8 +81,15 @@ def commands(n, start, count=None, sensor="stats"):
     return [shell(start + k, f"echo {k}", f"cmd{n}", sensor=sensor) for k in range(count or 1 + n % 3)]
 
 
-def closed(n, start, duration=None, sensor="stats"):
-    return [record(start, eventid="cowrie.session.closed", session=f"len{n}", sensor=sensor, duration_ms=duration or 10000 + n * 2000)]
+def closed(n, start, duration=None, sensor="stats", login=True):
+    session = [record(start, eventid="cowrie.session.closed", session=f"len{n}", sensor=sensor, duration_ms=duration or 10000 + n * 2000)]
+    if login:
+        session.insert(0, record(start - 1, eventid="cowrie.login.success", session=f"len{n}", sensor=sensor, username="root"))
+    return session
+
+
+def scanners(count):
+    return [record(n, eventid="cowrie.session.closed", session=f"scan{n}", duration_ms=0) for n in range(count)]
 
 
 STAT_CASES = [
@@ -94,6 +101,8 @@ STAT_CASES = [
     ("Command-heavy session against established peers", peers(commands) + commands(99, 30 * HOUR, 40, "other"), {"STAT-003"}),
     ("Long session against established peers", peers(closed) + closed(99, 30 * HOUR, 7200000, "other"), {"STAT-004"}),
     ("Too few peers stays quiet", peers(commands, 5) + commands(99, 30 * HOUR, 40, "other"), set()),
+    ("Scanner sessions do not form the duration baseline", scanners(60) + peers(closed, 5) + closed(99, 30 * HOUR, 7200000, "other"), set()),
+    ("A long session without a login is not judged", peers(closed) + closed(99, 30 * HOUR, 7200000, "other", login=False), set()),
     ("Baseline excludes the judged bucket", [e for h, c in enumerate(RATES[:11] + [100]) for e in connects(h, c)], set()),
     ("Peers exclude the judged session", peers(commands, 19) + commands(99, 30 * HOUR, 40, "other"), set()),
     ("Spread baseline with MAD of zero uses mean absolute deviation",

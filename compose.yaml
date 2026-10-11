@@ -23,6 +23,9 @@ services:
     image: cowrie/cowrie@sha256:710f1e4601a663ac8591f58a42b44e4cd3b7ea170c7e6cdb9e54c430a30cd459
     environment:
       COWRIE_HONEYPOT_HOSTNAME: ssh-lab-01
+      # Stable sensor identity. Unset, Cowrie 3.1.1 logs the container ID, which changes on every
+      # recreate and would split one sensor's history and statistical baselines.
+      COWRIE_HONEYPOT_SENSOR_NAME: ssh-lab-01
       COWRIE_HONEYPOT_BACKEND: shell
       COWRIE_TELNET_ENABLED: "false"
       COWRIE_SSH_FORWARDING: "false"

@@ -21,7 +21,7 @@ METRICS = {
     "STAT-001": dict(name="Event rate spike on a sensor", kind="temporal", unit="events per bucket", min_excess=20, scope="sensor"),
     "STAT-002": dict(name="Unusual username breadth from one source", kind="peer", unit="distinct usernames per bucket", min_excess=5, scope="source"),
     "STAT-003": dict(name="Unusual command volume in a session", kind="peer", unit="shell commands per session", min_excess=10, scope="session"),
-    "STAT-004": dict(name="Unusually long session", kind="peer", unit="session duration (ms)", min_excess=300000, scope="session"),
+    "STAT-004": dict(name="Unusually long interactive session", kind="peer", unit="session duration (ms)", min_excess=300000, scope="session"),
 }
 assert tuple(METRICS) == STAT_IDS
 
@@ -33,7 +33,7 @@ def catalog(config):
         "STAT-001": f"Events on one sensor in a {bucket}-second bucket compared with its previous {window} buckets (at least {config['stats_min_baseline']}).",
         "STAT-002": f"Distinct usernames one source address tried in a {bucket}-second bucket compared with {peers}.",
         "STAT-003": f"Shell commands in one session compared with {peers} that ran commands.",
-        "STAT-004": f"Session duration reported by Cowrie compared with {peers}.",
+        "STAT-004": f"Duration of a session with an accepted login, compared with {peers} that also logged in. Scanner sessions are excluded because they dominate honeypot traffic and close almost instantly.",
     }
     return [{"id": rule_id, "name": m["name"], "engine": "statistical", "version": STATS_VERSION, "severity": "low", "technique": None,
              "category": "anomaly", "description": descriptions[rule_id] + f" Alerts need a robust z-score of at least {config['stats_z_threshold']} "
@@ -158,6 +158,7 @@ def compute(events, config):
     # Peer metrics: one value per entity, judged against entities of the preceding peer window.
     auth, commands, durations = {}, {}, []
     by_session = {}
+    interactive = {session_key(e) for e in events if e["eventid"] == "cowrie.login.success"}
     for e in events:
         by_session.setdefault(session_key(e), []).append(e)
         if e["eventid"] in ("cowrie.login.failed", "cowrie.login.success") and e.get("username"):
@@ -166,7 +167,7 @@ def compute(events, config):
             entry["events"].append(e)
         if is_shell_command(e):
             commands.setdefault(session_key(e), []).append(e)
-        if e["eventid"] == "cowrie.session.closed" and isinstance(e.get("duration_ms"), (int, float)):
+        if e["eventid"] == "cowrie.session.closed" and isinstance(e.get("duration_ms"), (int, float)) and session_key(e) in interactive:
             durations.append(e)
     peer_sets = {
         "STAT-002": [(b * bucket, len(v["names"]), (src, b, v["events"])) for (src, b), v in auth.items()],
