@@ -182,6 +182,27 @@ MIGRATIONS.append((6, "Analyst session labels with history", [
         after_value TEXT)""",
     "CREATE INDEX session_label_history_key ON session_label_history(dataset, session_key, id)",
 ]))
+MIGRATIONS.append((7, "Accounts, persisted settings, and settings history", [
+    """CREATE TABLE users(
+        username TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('viewer', 'analyst', 'admin')),
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        last_login_at TEXT)""",
+    """CREATE TABLE settings(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        actor TEXT NOT NULL)""",
+    """CREATE TABLE settings_history(
+        id INTEGER PRIMARY KEY,
+        key TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        changed_at TEXT NOT NULL,
+        before_value TEXT,
+        after_value TEXT)""",
+]))
 LABEL_TYPES = ("credential_access", "discovery", "transfer", "intrusion_sequence", "anomaly")
 
 RANK = {"low": 1, "medium": 2, "high": 3}
@@ -686,6 +707,59 @@ class Store:
         findings = [f for f in candidates if ids & set(f["evidence_event_ids"])]
         return dict(events=events[:limit], truncated=len(events) > limit, findings=findings,
                     incident_ids=sorted({f.get("incident_id") for f in findings} - {None}))
+
+    # --- Accounts and settings -----------------------------------------------------------------
+
+    def user(self, username):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def users(self):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            return [dict(r) for r in db.execute("SELECT username, role, disabled, created_at, last_login_at FROM users ORDER BY username")]
+
+    def add_user(self, username, password_hash, role):
+        with self.connect() as db:
+            db.execute("INSERT INTO users(username, password_hash, role, created_at) VALUES (?,?,?,?)", (username, password_hash, role, utcnow()))
+
+    def update_user(self, username, **fields):
+        allowed = {"password_hash", "role", "disabled", "last_login_at"}
+        if not fields or not set(fields) <= allowed:
+            raise ValueError("Unknown account field")
+        with self.connect() as db:
+            changed = db.execute(f"UPDATE users SET {', '.join(f'{k}=?' for k in fields)} WHERE username=?", [*fields.values(), username]).rowcount
+        if not changed:
+            raise ValueError(f"No account named {username}")
+
+    def count_users(self):
+        with self.connect() as db:
+            return db.execute("SELECT count(*) FROM users WHERE disabled=0").fetchone()[0]
+
+    def setting(self, key):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_setting(self, key, value, actor):
+        now = utcnow()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            after = json.dumps(value, sort_keys=True)
+            if row and row[0] == after:
+                return
+            db.execute("INSERT INTO settings VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, actor=excluded.actor",
+                       (key, after, now, actor))
+            db.execute("INSERT INTO settings_history(key, actor, changed_at, before_value, after_value) VALUES (?,?,?,?,?)",
+                       (key, actor, now, row[0] if row else None, after))
+
+    def settings_history(self, key, limit=50):
+        with self.connect() as db:
+            return [{"actor": a, "changed_at": t, "before": json.loads(b) if b else None, "after": json.loads(v)}
+                    for a, t, b, v in db.execute("SELECT actor, changed_at, before_value, after_value FROM settings_history WHERE key=? ORDER BY id DESC LIMIT ?", (key, limit))]
 
     # --- Analyst labels ----------------------------------------------------------------------
 

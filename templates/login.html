@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{ csrf }}">
+<title>Aegis · Sign in</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/login.js" defer></script>
+</head>
+<body class="login-page">
+<main class="login-card panel">
+<a class="brand" href="/login" aria-label="Aegis"><span class="brand-mark">A</span><span>Aegis<small>Defense & deception lab</small></span></a>
+<h1>Sign in</h1>
+<p class="muted">Accounts are created by an administrator with <code>python -m aegis.users add</code>.</p>
+<form id="login-form">
+<label for="username">Username</label><input id="username" name="username" autocomplete="username" maxlength="64" required>
+<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+<button class="button primary" type="submit">Sign in</button>
+</form>
+<p id="login-error" role="alert" hidden></p>
+</main>
+</body>
+</html>

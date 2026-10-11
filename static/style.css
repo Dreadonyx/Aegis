@@ -1651,3 +1651,38 @@ dialog pre {
     justify-content:flex-start
   }
 }
+
+.login-page {
+  display:grid;
+  place-items:center;
+  min-height:100vh;
+  padding:16px;
+  box-sizing:border-box
+}
+.login-card {
+  width:min(380px, 100%);
+  padding:28px
+}
+.login-card .brand {
+  color:inherit;
+  margin-bottom:18px
+}
+#login-form {
+  display:grid;
+  gap:8px;
+  margin-top:14px
+}
+#login-form input {
+  font:inherit;
+  padding:9px 10px;
+  border:1px solid var(--line);
+  border-radius:4px
+}
+#login-form button {
+  margin-top:8px;
+  justify-content:center
+}
+#login-error {
+  color:#8a2f2f;
+  font-size:12px
+}

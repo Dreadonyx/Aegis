@@ -43,6 +43,16 @@ class Analyzer:
         self.lock = threading.Lock()
         self.stats_run = {}
 
+    def reconfigure(self, config):
+        """Apply new detection settings and recompute every dataset's findings and signals."""
+        with self.lock:
+            self.config = validate_config(config)
+            self.fingerprint = fingerprint(self.config)
+            self.stats_fingerprint = statistics.fingerprint(self.config)
+            self.catalog = catalog(self.config)
+            self.models = {}
+        return self.refresh()
+
     def analyze(self, dataset, src_ips=None):
         """Recompute detection for some source addresses of a dataset, or all of it. Returns a summary,
         or None when detection failed (the dataset is then marked for recomputation)."""

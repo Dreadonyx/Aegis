@@ -19,11 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, Response, jsonify, render_template, request, session
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
 from aegis import assistant
+from aegis.auth import RateLimiter, allowed, verify
+from aegis.engine import validate_config
 from aegis.analysis import Analyzer, load_config
 from aegis.engine import RULESET_VERSION, detect, report
 from aegis.statistics import describe
@@ -55,17 +57,96 @@ DATASET_LABELS = {"demo": "synthetic replay; not observed attacks", "imported": 
                   "live": "collected from the configured Cowrie sensor"}
 
 
-def create_app(database=None, detection_config=None, model_dir=None):
+def runtime_settings(environ=None):
+    """Deployment settings from the environment. Production refuses to start without its secrets."""
+    env = os.environ if environ is None else environ
+    mode = env.get("AEGIS_ENV", "development")
+    if mode not in ("development", "production"):
+        raise ValueError("AEGIS_ENV must be development or production")
+    production = mode == "production"
+    auth = env.get("AEGIS_AUTH", "required" if production else "off")
+    if auth not in ("required", "off"):
+        raise ValueError("AEGIS_AUTH must be required or off")
+    secret = env.get("AEGIS_SECRET_KEY", "")
+    if production:
+        if auth != "required":
+            raise ValueError("Production requires AEGIS_AUTH=required")
+        if len(secret) < 32:
+            raise ValueError("Production requires AEGIS_SECRET_KEY with at least 32 characters (for example: python -c 'import secrets; print(secrets.token_hex(32))')")
+    hosts = [h.strip() for h in env.get("AEGIS_TRUSTED_HOSTS", "").split(",") if h.strip()]
+    return {"production": production, "auth_required": auth == "required", "secret_key": secret or secrets.token_hex(32),
+            "trusted_hosts": ["localhost", "127.0.0.1", "[::1]"] + hosts, "cookie_secure": env.get("AEGIS_COOKIE_SECURE", "true" if production else "false") == "true",
+            "metrics_token": env.get("AEGIS_METRICS_TOKEN") or None, "session_hours": float(env.get("AEGIS_SESSION_HOURS", "8"))}
+
+
+PUBLIC_PATHS = {"/login", "/api/v1/health/live", "/api/v1/health/ready", "/api/v1/auth/login", "/api/v1/auth/me"}
+ADMIN_ENDPOINTS = {"update_detection_settings"}
+# (requests, seconds) per client for expensive endpoints.
+LIMITS = {"download_report": (30, 60), "evidence_export": (30, 60), "export_events": (10, 60), "import_events": (10, 60),
+          "import_eve_or_cowrie": (10, 60), "replay": (10, 60), "statistics_series": (60, 60), "ai_report": (6, 60)}
+
+
+def create_app(database=None, detection_config=None, model_dir=None, settings=None):
+    settings = settings or runtime_settings()
     app = Flask(__name__)
-    app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=2 * 1024 * 1024,
-                      SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
-                      TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"])
+    app.config.update(SECRET_KEY=settings["secret_key"], MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+                      SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_NAME="aegis_session",
+                      SESSION_COOKIE_SECURE=settings["cookie_secure"], PERMANENT_SESSION_LIFETIME=int(settings["session_hours"] * 3600),
+                      TRUSTED_HOSTS=settings["trusted_hosts"], AUTH_REQUIRED=settings["auth_required"], PRODUCTION=settings["production"])
     store = Store(database or os.environ.get("AEGIS_DB", ROOT / "data/aegis.sqlite3"))
     app.extensions["store"] = store
-    analyzer = Analyzer(store, detection_config if detection_config is not None else load_config(), model_dir)
+    saved = store.setting("detection")
+    config = validate_config(saved) if saved else (detection_config if detection_config is not None else load_config())
+    analyzer = Analyzer(store, config, model_dir)
     app.extensions["analyzer"] = analyzer
     analyzer.refresh()  # recompute stored detections when rules or settings changed
     ai_lock = threading.Lock()
+    limiter = RateLimiter()
+    app.extensions["limiter"] = limiter
+
+    def client_key():
+        return session.get("user") or request.remote_addr or "unknown"
+
+    @app.before_request
+    def authenticate():
+        """Who is calling, and may they? Runs before CSRF checks; health probes and the login page are public."""
+        g.user, g.role = ("local-analyst", "admin") if not settings["auth_required"] else (None, None)
+        if not settings["auth_required"]:
+            return None
+        if request.path.startswith("/static/") or request.path in PUBLIC_PATHS:
+            username = session.get("user")
+            if username:
+                g.user, g.role = username, session.get("role")
+            return None
+        username = session.get("user")
+        account = store.user(username) if username else None
+        if account and not account["disabled"]:
+            g.user, g.role = account["username"], account["role"]  # role changes apply on the next request
+            session["role"] = account["role"]
+        elif username:
+            session.clear()
+        token = settings["metrics_token"]
+        if not g.user and token and request.path == "/api/v1/metrics" and hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {token}"):
+            g.user, g.role = "metrics-scraper", "viewer"
+        if not g.user:
+            if request.path.startswith("/api/"):
+                return jsonify(error="Sign in to use Aegis."), 401
+            return redirect("/login")
+        needed = "admin" if request.endpoint in ADMIN_ENDPOINTS else ("viewer" if request.method in ("GET", "HEAD", "OPTIONS") else "analyst")
+        if not allowed(g.role, needed):
+            return jsonify(error=f"This action needs the {needed} role."), 403
+        return None
+
+    @app.before_request
+    def limit():
+        rule = LIMITS.get(request.endpoint)
+        if rule:
+            wait = limiter.hit(f"{request.endpoint}:{client_key()}", *rule)
+            if wait:
+                response = jsonify(error="Too many requests. Wait a moment and try again.")
+                response.headers["Retry-After"] = str(wait)
+                return response, 429
+        return None
 
     @app.before_request
     def protect():
@@ -171,6 +252,48 @@ def create_app(database=None, detection_config=None, model_dir=None):
     def index():
         session.setdefault("csrf", secrets.token_hex(32))
         return render_template("index.html", csrf=session["csrf"])
+
+    @app.get("/login")
+    def login_page():
+        if not settings["auth_required"] or session.get("user"):
+            return redirect("/")
+        session.setdefault("csrf", secrets.token_hex(32))
+        return render_template("login.html", csrf=session["csrf"])
+
+    @app.post("/api/v1/auth/login")
+    def login():
+        body = request.get_json(silent=True)
+        if not settings["auth_required"]:
+            return jsonify(error="Authentication is turned off (AEGIS_AUTH=off)."), 400
+        if not isinstance(body, dict) or not isinstance(body.get("username"), str) or not isinstance(body.get("password"), str):
+            raise ValueError("username and password are required")
+        username = body["username"].strip().lower()[:64]
+        for key, rule in ((f"login-ip:{request.remote_addr}", (20, 300)), (f"login-user:{username}", (5, 300))):
+            wait = limiter.hit(key, *rule)
+            if wait:
+                response = jsonify(error="Too many sign-in attempts. Wait and try again.")
+                response.headers["Retry-After"] = str(wait)
+                return response, 429
+        account = store.user(username)
+        if not verify(account["password_hash"] if account else None, body["password"]) or account["disabled"]:
+            app.logger.warning(json.dumps({"event": "login_failed", "username": username, "remote": request.remote_addr}))
+            return jsonify(error="Invalid username or password."), 401
+        limiter.reset(f"login-user:{username}")
+        session.clear()  # new session on sign-in: no fixation
+        session.permanent = True
+        session.update(user=account["username"], role=account["role"], csrf=secrets.token_hex(32))
+        store.update_user(account["username"], last_login_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        app.logger.info(json.dumps({"event": "login", "username": account["username"], "role": account["role"]}))
+        return jsonify(user=account["username"], role=account["role"], csrf=session["csrf"])
+
+    @app.post("/api/v1/auth/logout")
+    def logout():
+        session.clear()
+        return jsonify(status="signed out")
+
+    @app.get("/api/v1/auth/me")
+    def whoami():
+        return jsonify(user=g.user, role=g.role, auth="required" if settings["auth_required"] else "off")
 
     @app.get("/api/health")
     def health():
@@ -303,7 +426,7 @@ def create_app(database=None, detection_config=None, model_dir=None):
             raise ValueError("note must be text of at most 500 characters")
         first = events[0]
         store.set_label(source, session_key(first), first["session"], first["sensor"], body["label"], types if body["label"] else [],
-                        note.strip() if note else None, "local-analyst")
+                        note.strip() if note else None, g.user)
         label, history = store.label(source, session_key(first))
         return jsonify(label=label, label_history=history)
 
@@ -353,7 +476,20 @@ def create_app(database=None, detection_config=None, model_dir=None):
     @app.get("/api/v1/detection")
     def detection_settings():
         return jsonify(config=analyzer.config, fingerprint=analyzer.fingerprint, ruleset_version=RULESET_VERSION,
-                       catalog=analyzer.catalog, state={d: store.detection_state(d) for d in ("demo", "imported", "live")})
+                       catalog=analyzer.catalog, state={d: store.detection_state(d) for d in ("demo", "imported", "live")},
+                       history=store.settings_history("detection"), source="database" if store.setting("detection") else "file or defaults")
+
+    @app.put("/api/v1/detection")
+    def update_detection_settings():
+        """Admin only. Validated, persisted with history, and applied by recomputing stored detections."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError("Send the detection settings as a JSON object")
+        config = validate_config(body)
+        store.set_setting("detection", config, g.user)
+        analyzer.reconfigure(config)
+        app.logger.info(json.dumps({"event": "detection_settings_changed", "actor": g.user, "fingerprint": analyzer.fingerprint}))
+        return jsonify(config=analyzer.config, fingerprint=analyzer.fingerprint, history=store.settings_history("detection"))
 
     @app.get("/api/evaluation")
     def evaluation():
@@ -552,7 +688,7 @@ def create_app(database=None, detection_config=None, model_dir=None):
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or body.get("status") not in TRANSITIONS:
             raise ValueError("Choose open, investigating, resolved, or false_positive")
-        store.set_status(incident["id"], body["status"])
+        store.set_status(incident["id"], body["status"], g.user)
         return jsonify(status=body["status"], incident_id=incident["id"])
 
     @app.post("/api/incidents/<incident_id>/notes")
@@ -564,7 +700,7 @@ def create_app(database=None, detection_config=None, model_dir=None):
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
             raise ValueError("Write a note between 1 and 2,000 characters")
-        store.add_note(incident["id"], text.strip())
+        store.add_note(incident["id"], text.strip(), g.user)
         return jsonify(activity=store.activity(incident["id"])), 201
 
     @app.get("/api/incidents/<incident_id>/evidence")

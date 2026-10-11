@@ -39,6 +39,7 @@ async function api(path, options = {}) {
   try {
     const response = await fetch(path, {...options, signal: controller.signal,
       headers: {'X-Aegis-CSRF': $('meta[name="csrf-token"]').content, ...options.headers}});
+    if (response.status === 401 && !path.startsWith('/api/v1/auth/')) { window.location.assign('/login'); throw new Error('Sign in to continue.'); }
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Request failed');
     return data;
@@ -63,6 +64,12 @@ function showView(next) {
   if (next === 'findings') loadFindings().catch(e => notify(e.message, true));
   if (next === 'sources') loadSources().catch(e => notify(e.message, true));
   if (next === 'lab') loadEvaluation().catch(e => notify(e.message, true));
+}
+
+async function whoAmI() {
+  const me = await api('/api/v1/auth/me');
+  $('#who').textContent = me.auth === 'off' ? 'Local mode · no sign-in' : `${me.user} · ${me.role}`;
+  $('#logout').hidden = me.auth === 'off';
 }
 
 async function load({background = false} = {}) {
@@ -387,6 +394,7 @@ document.addEventListener('click', async event => {
       if (record) await openEvent(record);
     }
     if (target.id === 'close-event') $('#event-dialog').close();
+    if (target.id === 'logout') { await api('/api/v1/auth/logout', {method: 'POST'}); window.location.assign('/login'); return; }
     if (target.id === 'close-session') $('#session-dialog').close();
     if (target.dataset.session) await openSession(target.dataset.session, target.dataset.sensor);
     if (target.id === 'open-session' && currentEvent) { $('#event-dialog').close(); await openSession(currentEvent.session, currentEvent.sensor); }
@@ -488,4 +496,5 @@ setInterval(() => {
     });
   }
 }, 15000);
+whoAmI().catch(() => {});
 load().catch(error => notify(error.message, true));
