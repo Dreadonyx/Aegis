@@ -5,6 +5,9 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       AEGIS_COWRIE_LOG: /cowrie-log/cowrie.json
+      # The container listens on 0.0.0.0 but the port is published on host loopback only (below).
+      # Use AEGIS_AUTH=required (and accounts) before exposing it any further.
+      AEGIS_ALLOW_UNAUTHENTICATED_BIND: "true"
     volumes:
       - aegis-data:/app/data
       - cowrie-log:/cowrie-log:ro

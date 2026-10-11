@@ -23,7 +23,7 @@ from flask import Flask, Response, g, jsonify, redirect, render_template, reques
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
-from aegis import assistant
+from aegis import assistant, logs
 from aegis.auth import RateLimiter, allowed, verify
 from aegis.engine import validate_config
 from aegis.analysis import Analyzer, load_config
@@ -103,6 +103,7 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
     ai_lock = threading.Lock()
     limiter = RateLimiter()
     app.extensions["limiter"] = limiter
+    logs.install(app)  # request IDs first, so every later log line carries one
 
     def client_key():
         return session.get("user") or request.remote_addr or "unknown"
@@ -793,11 +794,40 @@ def follow_eve(app, path):
     return follow_log(app, path, "suricata-eve", lambda raw, source: normalize_eve(raw, source, sensor), "suricata")
 
 
+def loopback(address):
+    try:
+        return address == "localhost" or ipaddress.ip_address(address.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def serve(app):
+    """Production WSGI server (waitress). Set AEGIS_TRUSTED_PROXY to the reverse proxy's address so client
+    addresses (rate limits, logs) and HTTPS come from X-Forwarded-* headers."""
+    from waitress import serve as waitress_serve
+    bind, port = os.environ.get("AEGIS_BIND", "127.0.0.1"), int(os.environ.get("AEGIS_PORT", "8000"))
+    if not app.config["AUTH_REQUIRED"] and not loopback(bind) and os.environ.get("AEGIS_ALLOW_UNAUTHENTICATED_BIND") != "true":
+        sys.exit(f"Refusing to listen on {bind} without sign-in. Set AEGIS_AUTH=required, bind to 127.0.0.1, or (only when the port "
+                 "is published on host loopback, as in compose.yaml) set AEGIS_ALLOW_UNAUTHENTICATED_BIND=true.")
+    options = {"host": bind, "port": port, "threads": int(os.environ.get("AEGIS_THREADS", "8")), "ident": "aegis"}
+    proxy = os.environ.get("AEGIS_TRUSTED_PROXY")
+    if proxy:
+        options.update(trusted_proxy=proxy, trusted_proxy_count=1, trusted_proxy_headers={"x-forwarded-for", "x-forwarded-proto"},
+                       clear_untrusted_proxy_headers=True)
+    app.logger.info(json.dumps({"event": "start", "bind": bind, "port": port, "auth": "required" if app.config["AUTH_REQUIRED"] else "off",
+                                "production": app.config["PRODUCTION"], "schema_version": app.extensions["store"].schema_version()}))
+    waitress_serve(app, **options)
+
+
 if __name__ == "__main__":
     # docker stop sends SIGTERM; exiting through SystemExit runs atexit, so the collector
     # finishes its current batch instead of being killed mid-poll.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    app = create_app()
+    logs.configure(os.environ.get("AEGIS_LOG_LEVEL", "INFO"))
+    try:
+        app = create_app()
+    except ValueError as error:
+        sys.exit(f"Aegis configuration error: {error}")
     try:
         if os.environ.get("AEGIS_COWRIE_LOG"):
             follow_log(app, os.environ["AEGIS_COWRIE_LOG"])
@@ -805,4 +835,4 @@ if __name__ == "__main__":
             follow_eve(app, os.environ["AEGIS_SURICATA_EVE"])
     except ValueError as error:
         sys.exit(f"Aegis configuration error: {error}")
-    app.run(host=os.environ.get("AEGIS_BIND", "127.0.0.1"), port=int(os.environ.get("AEGIS_PORT", "8000")), debug=False)
+    serve(app)
