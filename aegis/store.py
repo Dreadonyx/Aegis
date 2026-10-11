@@ -249,6 +249,29 @@ def chain_link(prev_hash, row):
     return hashlib.sha256(json.dumps(fields, separators=(",", ":")).encode()).hexdigest()
 
 
+def verify_chain_db(db):
+    """Recompute every raw-evidence digest and link over any connection (read-only is enough)."""
+    prev, count, purged = GENESIS, 0, 0
+    db.row_factory = sqlite3.Row
+    for row in db.execute(f"SELECT {','.join(RAW_COLUMNS)}, raw, prev_hash, chain_hash FROM raw_events ORDER BY seq"):
+        problem = None
+        if row["raw"] is None:
+            purged += 1
+        elif hashlib.sha256(row["raw"]).hexdigest() != row["raw_sha256"]:
+            problem = "raw bytes do not match their recorded digest"
+        if not problem and row["prev_hash"] != prev:
+            problem = "link to the previous record is broken (a record was removed or reordered)"
+        if not problem and chain_link(prev, row) != row["chain_hash"]:
+            problem = "record metadata or digest was altered"
+        if problem:
+            db.row_factory = None
+            return dict(valid=False, records=count, purged=purged, first_invalid_seq=row["seq"], reason=problem)
+        prev, count = row["chain_hash"], count + 1
+    db.row_factory = None
+    head_seq = db.execute("SELECT max(seq) FROM raw_events").fetchone()[0]
+    return dict(valid=True, records=count, purged=purged, head_seq=head_seq, head_hash=prev)
+
+
 class Store:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -358,24 +381,8 @@ class Store:
     def verify_chain(self):
         """Recompute every digest and link. Detects altered, reordered, or removed records, except
         removal of the newest records: compare head_hash with a copy kept elsewhere to cover that."""
-        prev, count, purged = GENESIS, 0, 0
         with self.connect() as db:
-            db.row_factory = sqlite3.Row
-            for row in db.execute(f"SELECT {','.join(RAW_COLUMNS)}, raw, prev_hash, chain_hash FROM raw_events ORDER BY seq"):
-                problem = None
-                if row["raw"] is None:
-                    purged += 1
-                elif hashlib.sha256(row["raw"]).hexdigest() != row["raw_sha256"]:
-                    problem = "raw bytes do not match their recorded digest"
-                if not problem and row["prev_hash"] != prev:
-                    problem = "link to the previous record is broken (a record was removed or reordered)"
-                if not problem and chain_link(prev, row) != row["chain_hash"]:
-                    problem = "record metadata or digest was altered"
-                if problem:
-                    return dict(valid=False, records=count, purged=purged, first_invalid_seq=row["seq"], reason=problem)
-                prev, count = row["chain_hash"], count + 1
-            head_seq = db.execute("SELECT max(seq) FROM raw_events").fetchone()[0]
-        return dict(valid=True, records=count, purged=purged, head_seq=head_seq, head_hash=prev)
+            return verify_chain_db(db)
 
     def purge_raw(self, ingested_before):
         """Retention: drop raw bytes older than a UTC ISO timestamp. Digests and links remain."""

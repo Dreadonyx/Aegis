@@ -31,6 +31,7 @@ from aegis.engine import RULESET_VERSION, detect, report
 from aegis.statistics import describe
 from aegis.evaluate import evaluate
 from aegis.labels import LABEL_TYPES, redact, suggest
+from aegis.maintenance import Retention
 from aegis.suricata import normalize_eve
 from aegis.rules import session_key
 from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
@@ -590,6 +591,10 @@ def create_app(database=None, detection_config=None, model_dir=None, settings=No
             metric("aegis_collector_bytes_behind", "gauge", "Unread bytes in the current log file.", [(who, collector.bytes_behind())])
             metric("aegis_collector_consecutive_failures", "gauge", "Consecutive failed polls.", [(who, collector.status["consecutive_failures"])])
             metric("aegis_collector_worker_restarts_total", "counter", "Collector recoveries from unexpected errors.", [(who, collector.status["worker_restarts"])])
+        retention = app.extensions.get("retention")
+        if retention:
+            metric("aegis_raw_purged_total", "counter", "Raw records whose bytes were purged by retention since process start.",
+                   [({}, retention.status["purged_total"])])
         return Response("\n".join(lines) + "\n", mimetype="text/plain; version=0.0.4")
 
     @app.post("/api/replay")
@@ -833,6 +838,11 @@ if __name__ == "__main__":
             follow_log(app, os.environ["AEGIS_COWRIE_LOG"])
         if os.environ.get("AEGIS_SURICATA_EVE"):
             follow_eve(app, os.environ["AEGIS_SURICATA_EVE"])
+        if os.environ.get("AEGIS_RAW_RETENTION_DAYS"):
+            days = os.environ["AEGIS_RAW_RETENTION_DAYS"]
+            retention = Retention(app.extensions["store"], int(days) if days.isdigit() else -1)
+            app.extensions["retention"] = retention.start()
+            atexit.register(retention.stop)
     except ValueError as error:
         sys.exit(f"Aegis configuration error: {error}")
     serve(app)
