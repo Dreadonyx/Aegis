@@ -21,6 +21,7 @@ from werkzeug.exceptions import HTTPException
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
 from aegis.analysis import Analyzer, load_config
 from aegis.engine import RULESET_VERSION, detect, report
+from aegis.statistics import describe
 from aegis.evaluate import evaluate
 from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
 from aegis.store import TRANSITIONS, Store, TransitionError
@@ -95,7 +96,10 @@ def create_app(database=None, detection_config=None):
     def incident_by_id(incident_id):
         dataset = source_arg()
         analyzer.ensure_current(dataset)
-        return store.incident(dataset, incident_id)
+        incident = store.incident(dataset, incident_id)
+        if incident:
+            incident["signals"] = store.signals_for(incident)
+        return incident
 
     def paging(default=50, maximum=500):
         try:
@@ -154,6 +158,7 @@ def create_app(database=None, detection_config=None):
             open_incidents=sum(i["status"] in ("open", "investigating") for i in found), timeline=stats["timeline"],
             rules=analyzer.catalog, ai_enabled=bool(os.environ.get("AEGIS_OLLAMA_MODEL")), ruleset_version=RULESET_VERSION,
             dataset_label=DATASET_LABELS[source], detection=store.detection_state(source), storage=store.usage(),
+            statistics=statistics_summary(source),
             collector=collector_status())
 
     @app.get("/api/events")
@@ -167,6 +172,34 @@ def create_app(database=None, detection_config=None):
         page, limit, offset = paging()
         total, events = store.query_events(source, query, filters, limit, offset)
         return page_result("events", total, events, page, limit)
+
+    def statistics_summary(dataset):
+        state = store.stats_state(dataset) or {}
+        baselines = state.get("baselines", [])
+        return dict(enabled=analyzer.config["statistical_enabled"], as_of=state.get("as_of"), computed_at=state.get("computed_at"),
+                    dirty=state.get("dirty"), last_error=state.get("last_error"), baselines=baselines,
+                    cold_start=any(b["state"] == "insufficient_baseline" for b in baselines) or not baselines,
+                    signals=store.findings(dataset, {"engine": "statistical", "status": "active"}, 1, 0)[0])
+
+    @app.get("/api/v1/statistics")
+    def statistics_status():
+        source = source_arg()
+        analyzer.ensure_current(source)
+        return jsonify(dataset=source, **statistics_summary(source), finding_counts=store.finding_counts(source),
+                       note="Baselines use only this dataset's earlier data. Unusual is not malicious.")
+
+    @app.get("/api/v1/statistics/series")
+    def statistics_series():
+        source = source_arg()
+        try:
+            bucket = int(request.args.get("bucket", "3600"))
+            if not 60 <= bucket <= 86400:
+                raise ValueError()
+        except ValueError:
+            raise ValueError("bucket must be from 60 to 86400 seconds") from None
+        since, until = time_arg("since"), time_arg("until")
+        result = describe(store.events_between(source, since, until), bucket, since, until)
+        return jsonify(dataset=source, since=since, until=until, **result)
 
     @app.get("/api/v1/incidents")
     def incident_list():
@@ -395,7 +428,7 @@ def create_app(database=None, detection_config=None):
         incident = incident_by_id(incident_id)
         if not incident:
             return jsonify(error="Incident not found"), 404
-        return Response(report(incident, store.provenance(e["id"] for e in incident["events"])), mimetype="text/plain", headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}.md"'})
+        return Response(report(incident, store.provenance(e["id"] for e in incident["events"]), incident.get("signals")), mimetype="text/plain", headers={"Content-Disposition": f'attachment; filename="aegis-{incident_id}.md"'})
 
     @app.post("/api/incidents/<incident_id>/ai")
     def ai_report(incident_id):
@@ -449,7 +482,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def follow_log(app, path, source_id=None):
     """Start the live collector; its state is reported by /api/v1/health/ready and /api/v1/sources."""
     source_id = source_id or os.environ.get("AEGIS_SOURCE_ID", "cowrie-live")
-    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id, on_commit=app.extensions["analyzer"].after_commit)
+    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id, on_commit=app.extensions["analyzer"].after_live_commit)
     app.extensions["collector"] = collector.start()
     atexit.register(collector.stop)
     return collector

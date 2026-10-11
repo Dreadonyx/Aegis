@@ -5,7 +5,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
-from aegis.engine import RULESET_VERSION, detect, normalize
+from aegis import statistics
+from aegis.engine import DEFAULT, RULESET_VERSION, detect, normalize
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -19,8 +20,8 @@ def login(second, session="evaluation"):
     return record(second, session=session, eventid="cowrie.login.success", username="root")
 
 
-def shell(second, text, session="evaluation"):
-    return record(second, session=session, eventid="cowrie.command.input", input=text)
+def shell(second, text, session="evaluation", **fields):
+    return record(second, session=session, eventid="cowrie.command.input", input=text, **fields)
 
 
 def download(second, session="evaluation", **fields):
@@ -55,6 +56,53 @@ CASES = [
 ]
 
 
+HOUR = 3600
+RATES = [10, 12, 9, 11, 8, 10, 13, 9, 10, 11, 12, 10, 9, 11, 10, 12, 8, 10, 11, 9]
+
+
+def connects(hour, count, sensor="stats"):
+    return [record(hour * HOUR + n, eventid="cowrie.session.connect", session=f"h{hour}-{n}", sensor=sensor, src_ip="192.0.2.50") for n in range(count)]
+
+
+def rate_series(final):
+    return [e for hour, count in enumerate(RATES + [final]) for e in connects(hour, count)]
+
+
+def peers(make, count=25):
+    return [e for n in range(count) for e in make(n, n * HOUR)]
+
+
+def guesses(n, start, names=None, sensor="stats"):
+    names = names or [f"user{k}" for k in range(1 + n % 3)]
+    return [record(start + k, session=f"src{n}-{k}", src_ip=f"198.51.100.{n + 1}", sensor=sensor, username=name) for k, name in enumerate(names)]
+
+
+def commands(n, start, count=None, sensor="stats"):
+    return [shell(start + k, f"echo {k}", f"cmd{n}", sensor=sensor) for k in range(count or 1 + n % 3)]
+
+
+def closed(n, start, duration=None, sensor="stats"):
+    return [record(start, eventid="cowrie.session.closed", session=f"len{n}", sensor=sensor, duration_ms=duration or 10000 + n * 2000)]
+
+
+STAT_CASES = [
+    ("Statistics stay quiet during cold start", [e for h, c in enumerate([10, 11, 9, 10, 200]) for e in connects(h, c)], set()),
+    ("Event rate spike after an established baseline", rate_series(100), {"STAT-001"}),
+    ("Small absolute increase stays below the excess guard", rate_series(16), set()),
+    ("Constant baseline uses the documented fallback", [e for h in range(21) for e in connects(h, 10 if h < 20 else 60)], {"STAT-001"}),
+    ("Username breadth outlier against established peers", peers(guesses) + guesses(99, 30 * HOUR, [f"name{k}" for k in range(30)], "other"), {"STAT-002"}),
+    ("Command-heavy session against established peers", peers(commands) + commands(99, 30 * HOUR, 40, "other"), {"STAT-003"}),
+    ("Long session against established peers", peers(closed) + closed(99, 30 * HOUR, 7200000, "other"), {"STAT-004"}),
+    ("Too few peers stays quiet", peers(commands, 5) + commands(99, 30 * HOUR, 40, "other"), set()),
+    ("Baseline excludes the judged bucket", [e for h, c in enumerate(RATES[:11] + [100]) for e in connects(h, c)], set()),
+    ("Peers exclude the judged session", peers(commands, 19) + commands(99, 30 * HOUR, 40, "other"), set()),
+    ("Spread baseline with MAD of zero uses mean absolute deviation",
+     # The 40s fall inside the cold-start period, so the final baseline is twelve 10s and eight 40s:
+     # median 10 and MAD 0, but a mean absolute deviation of 12 keeps 45 below the threshold.
+     [e for h, c in enumerate([40, 10, 40, 10, 40, 10, 40, 10, 40, 40, 40, 40] + [10] * 8 + [45]) for e in connects(h, c)], set()),
+]
+
+
 def evaluate():
     demo = [normalize(e, "demo") for e in demo_records()]
     sessions = {e["id"]: e["session"] for e in demo}
@@ -69,6 +117,9 @@ def evaluate():
             passed = passed and count == 1
         results.append(dict(name=name, passed=passed, expected=sorted(expected), actual=sorted(actual),
                             incidents=len(found), expected_incidents=incidents))
+    for name, events, expected in STAT_CASES:
+        actual = {f["id"] for f in statistics.compute(events, DEFAULT)["findings"]}
+        results.append(dict(name=name, passed=actual == expected, expected=sorted(expected), actual=sorted(actual), engine="statistical"))
     return dict(ruleset_version=RULESET_VERSION,
         scope="Synthetic regression checks only. These are not independent real-world detection benchmarks.",
         sessions=dict(true_positives=len(predicted & EXPECTED_POSITIVE), false_positives=len(predicted & EXPECTED_NEGATIVE),

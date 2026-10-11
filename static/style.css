@@ -1421,3 +1421,16 @@ dialog pre {
 .rule-rationale {
   color:var(--muted)
 }
+
+.finding.signal {
+  border-left-color:#b9a36b;
+  background:#fbfaf6
+}
+.check-icon.wait {
+  color:#8a7a4f
+}
+
+.check-summary.pending {
+  background:#f4f1ea;
+  color:#6b5a3e
+}

@@ -6,12 +6,14 @@ from aegis.fusion import fuse
 from aegis.rules import (DEFAULT_CONFIG, RULESET_VERSION, catalog as rule_catalog, fingerprint, is_discovery,  # noqa: F401
                          rule_findings, session_key, validate_config)
 from aegis.sequences import catalog as sequence_catalog, sequence_findings
+from aegis.statistics import catalog as statistics_catalog
 
 DEFAULT = validate_config(DEFAULT_CONFIG)
 
 
 def catalog(config=DEFAULT):
-    return rule_catalog(config) + sequence_catalog(config)
+    statistical = statistics_catalog(config) if config["statistical_enabled"] else []
+    return rule_catalog(config) + sequence_catalog(config) + statistical
 
 
 RULES = catalog()
@@ -28,7 +30,7 @@ DATASET_LABELS = {"demo": "demo (synthetic replay; these are not observed attack
 LINKS = {"anchor_session": "", "finding_session": " [other finding session]", "source_address": " [other session, address-linked]"}
 
 
-def report(incident, provenance=None):
+def report(incident, provenance=None, signals=None):
     lines = [f"# Aegis incident {incident['id']}", "", "Report source: deterministic detection rules (not AI)",
              f"Telemetry: {DATASET_LABELS.get(incident['source'], incident['source'])}",
              f"Severity: {incident['severity']} | Workflow: {incident['status']}",
@@ -45,6 +47,10 @@ def report(incident, provenance=None):
     if incident.get("correlation"):
         lines += ["", "## Correlation"]
         lines += [f"- {c['strength']}: {c['explanation']}" for c in incident["correlation"]]
+    if signals:
+        lines += ["", "## Related statistical signals", "Unusual relative to this dataset's history; not evidence of malicious intent. Not part of the severity."]
+        for signal in signals:
+            lines.append(f"- {signal['id']}: {signal['name']} (robust z {signal['score']}): {signal['rationale']['explanation']}")
     lines += ["", "## Evidence timeline"]
     for event in incident["events"]:
         detail = event.get("input", event.get("url", event.get("username", "")))

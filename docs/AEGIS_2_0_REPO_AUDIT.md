@@ -157,12 +157,12 @@ app factory.
 | Rotation / partial / malformed / dup / DB-outage tested | ◐ partial (rotation, partial, dup yes; malformed-continue + DB-outage no) |
 | Provenance + synthetic/live separation preserved in exports | ✓ (Phase 1-2) |
 | Findings carry reproducible rationale + exact evidence IDs | ✓ (Phase 2) |
-| Rule/stat/ML layers fail independently | ✗ only rules exist |
+| Rule/stat/ML layers fail independently | ◐ rules + statistics verified; ML not built |
 | ML disabled by default until evaluated | n/a — not built |
 | Authn/authz, validation, rate limits, secret handling reviewed | ◐ validation/CSRF yes; no authn, no rate limits |
 | Migrations, backup, restore tested | ✗ no migration framework |
 | Health, readiness, lag, error metrics | ✗ single health blob |
-| Labeled detection evaluation with real metrics | ✗ synthetic only (see PENDING.md) |
+| Labeled detection evaluation with real metrics | ◐ harness built; awaiting a real labeled dataset |
 | Pinned images/deps, least privilege, documented exposure | ✓ largely met |
 | No automated block/remediation by default | ✓ none exists |
 | Runbook, env template, rollback, release notes | ◐ README + PENDING; no env template/rollback doc |
@@ -222,3 +222,22 @@ Verification: 81 tests pass. Nine deliberate mutations (no burst merging, anchor
 Gate changes: "Findings carry reproducible rationale + exact evidence IDs" → ✓. "Provenance + synthetic/live separation preserved in exports" → ✓. "Migrations" stays ◐ (backup/restore untested, Phase 7).
 
 Not in Phase 2 (by the spec's plan): statistical analytics (Phase 3), ML (Phase 4), authentication (Phase 7; the actor is `local-analyst` until then), and changing detection settings from the UI (needs authentication).
+
+---
+
+## Phase 3 progress (2026-10-11)
+
+Implemented, with tests:
+
+- `aegis/statistics.py` (Layer B): STAT-001 sensor event-rate spike (temporal baseline with rate of change and drift), STAT-002 username breadth per source, STAT-003 commands per session, STAT-004 session duration (peer baselines). Median/MAD robust z-score with documented fallbacks, an absolute-excess guard, no lookahead, per-metric cold-start status, baselines confined to one dataset. Findings are low severity with `score_type = robust_z`, stored without incidents, and shown as related signals on matching incidents, exports, and reports.
+- Descriptive analytics: zero-filled per-bucket counts by event type, distinct sources, usernames, commands, and sessions; session duration and density summaries (`/api/v1/statistics/series`).
+- Persistence: migration 4 (`stats_state`); whole-dataset statistics recompute with isolation from ingestion and rules; live recompute throttled to 60 seconds, with reads catching up; rule and statistics recomputes scoped so neither supersedes the other's findings.
+- Offline evaluation (`aegis/labeled_eval.py`, `docs/EVALUATION.md`): labeled-dataset format, per-detector, per-type, and per-sensor confusion and metrics, time-separated scoring, dataset file digests, automatic limitations.
+- Configuration: `statistical_enabled` and seven validated `stats_*` settings; STAT IDs can be disabled individually.
+- UI: Lab panel of baseline states with sample sizes and drift; related-signal cards with robust z, sample size, and facts.
+
+Verification: 97 tests and 31 evaluation fixtures pass. Ten deliberate mutations (temporal lookahead, peer lookahead or self-inclusion, no cold-start minimum, no peer minimum, no excess guard, no MAD=0 fallback, each recompute superseding the other's findings, statistics failures escaping, the throttle skipping a first run) each made at least one test fail. Five survived the first pass; I added boundary fixtures and tightened tests until all were caught. A real server run took the live sensor baseline from 5/12 (cold start) to established, then raised one STAT-001 signal (robust z 74.2) for a spike hour, with no incident created.
+
+Gate change: "Rule, statistical and optional ML layers can fail independently without stopping core ingestion" → ◐ (rules and statistics verified independent; ML not built). "Labeled detection evaluation reports meaningful metrics and limitations" → ◐ (harness done; no real labeled dataset yet).
+
+Open: real labeled data (user offered to help: honeypot collection and/or a labeled dataset) is needed before any accuracy claim, and before Phase 4 ML can be validated.
