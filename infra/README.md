@@ -6,12 +6,12 @@ A short-lived Internet honeypot deployment of Aegis, paid for entirely by AWS Fr
 
 | | |
 | --- | --- |
-| Stack | `AegisStack` (CDK, Python), us-east-1, account <aws-account-id> |
+| Stack | `AegisStack` (CDK, Python), us-east-1 |
 | Deployed | 2026-10-09 |
-| Instance | `<instance-id>`, m7i-flex.large (2 vCPU, 8 GB), Amazon Linux 2023, 40 GB gp3 encrypted |
-| Honeypot | `<honeypot-public-ip>:22` (Cowrie, public) |
+| Instance | stack output `InstanceId`, m7i-flex.large (2 vCPU, 8 GB), Amazon Linux 2023, 40 GB gp3 encrypted |
+| Honeypot | stack output `HoneypotIP`, port 22 (Cowrie, public) |
 | Dashboard | `127.0.0.1:8000` on the instance, SSM tunnel only |
-| Raw log bucket | `<log-bucket>` (hourly sync, retained on stack delete) |
+| Raw log bucket | stack output `LogBucket` (hourly sync, retained on stack delete) |
 | AI | Ollama 0.34.3, `llama3.2:3b` (active) and `llama3.2:1b`, 240 s timeout |
 | Budget alert | `account-monthly-usage`: email at 80% of $120/month gross usage, actual or forecast |
 
@@ -72,16 +72,23 @@ You ──SSM port forward──▶ 127.0.0.1:8000
 
 ## Access
 
-Install the Session Manager plugin first (`aws-session-manager-plugin` on the AUR).
+Install the Session Manager plugin first (`aws-session-manager-plugin` on the AUR). Deployment identifiers are not kept in the repository; read them from the stack outputs:
+
+```bash
+output() { aws cloudformation describe-stacks --region us-east-1 --stack-name AegisStack \
+  --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+INSTANCE_ID=$(output InstanceId)
+LOG_BUCKET=$(output LogBucket)
+```
 
 ```bash
 # Dashboard: then open http://127.0.0.1:8000
-aws ssm start-session --region us-east-1 --target <instance-id> \
+aws ssm start-session --region us-east-1 --target $INSTANCE_ID \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}'
 
 # Shell on the instance
-aws ssm start-session --region us-east-1 --target <instance-id>
+aws ssm start-session --region us-east-1 --target $INSTANCE_ID
 
 # Useful on the instance
 sudo tail -f /var/log/aegis-init.log
@@ -94,7 +101,8 @@ To switch AI models, change `AEGIS_OLLAMA_MODEL` in `/opt/aegis/deploy/compose.a
 ## Known limits
 
 - The dashboard stops importing at its **50,000-event limit**, which an Internet honeypot can reach within days. Collection status then reads "Waiting for ... available storage". Raw Cowrie logs keep everything and are the evaluation dataset.
-- Outbound connections from Cowrie are blocked, so attacker downloads fail and the **completed-download rule will not fire** on live traffic.
+- Outbound connections from Cowrie are blocked, so network downloads (wget, curl) fail. Cowrie still records files captured from stdin or redirects as completed downloads, without a URL, so XFER-001 can fire on live traffic (it did on 2026-10-10).
+- Cowrie's default user database accepts most credentials: the first two days logged 9 accepted logins and no failures, so the brute-force rules (AUTH-001, AUTH-002, SEQ-002) rarely fire. Make the user database stricter if failed-login telemetry matters.
 - Raw logs contain real attacker addresses and attempted credentials. Treat the volume, bucket, and any local copies as sensitive.
 - Changing the source bundle and redeploying updates user data but does not rerun it. Redeploy the code on the instance manually or replace the instance.
 
@@ -111,15 +119,19 @@ The alert address is supplied at deploy time and is intentionally not stored in 
 
 Before 2026-10-28, download the data and remove everything:
 
+Run these in one shell: `cdk destroy` removes the stack outputs, so read the identifiers (above) first.
+
 ```bash
-# 1. Final log sync, then download raw logs
-aws ssm send-command --region us-east-1 --instance-ids <instance-id> \
-  --document-name AWS-RunShellScript --parameters 'commands=["/usr/local/sbin/aegis-log-sync"]'
-aws s3 sync s3://<log-bucket> ./aws-cowrie-logs
+# 1. Final log sync. send-command returns at once, so wait for it before downloading.
+CMD=$(aws ssm send-command --region us-east-1 --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript --parameters 'commands=["/usr/local/sbin/aegis-log-sync"]' \
+  --query Command.CommandId --output text)
+aws ssm wait command-executed --region us-east-1 --command-id "$CMD" --instance-id "$INSTANCE_ID"
+aws s3 sync "s3://$LOG_BUCKET" ./aws-cowrie-logs   # contains attacker IPs and attempted passwords: keep private
 
 # 2. Optional: export reports and evidence from the dashboard
 
-# 3. Delete the stack, then the retained bucket
+# 3. Delete the stack, then the retained bucket (only after confirming the download)
 cdk destroy AegisStack
-aws s3 rb s3://<log-bucket> --force
+aws s3 rb "s3://$LOG_BUCKET" --force
 ```
