@@ -62,6 +62,7 @@ def test_labels_are_audited_and_validated(client):
     assert timeline["label"]["label"] == "malicious" and timeline["label"]["types"] == ["credential_access", "discovery"]
     assert [(h["before"] or {}).get("label") for h in timeline["label_history"]] == ["malicious", None]
     assert timeline["label_history"][0]["actor"] == "local-analyst"
+    assert all(set(h) == {"actor", "changed_at", "before", "after"} for h in timeline["label_history"])  # no raw columns leak
     assert put({"label": None}).get_json()["label"] is None
     assert len(client.get("/api/v1/sessions/in/timeline?source=imported").get_json()["label_history"]) == 3
     for bad in ({"label": "evil"}, {"label": "benign", "types": ["nonsense"]}, {"label": "benign", "note": "x" * 501}, None):

@@ -780,7 +780,8 @@ class Store:
         if label:
             label["types"] = json.loads(label["types"])
         for h in history:
-            h["before"], h["after"] = (json.loads(h.pop(k)) if h.get(k) else None for k in ("before_value", "after_value"))
+            values = [h.pop(k) for k in ("before_value", "after_value")]
+            h["before"], h["after"] = (json.loads(v) if v else None for v in values)
         return label, history
 
     def set_label(self, dataset, session_key, session, sensor, label, types, note, actor):

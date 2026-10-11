@@ -70,6 +70,7 @@ with sync_playwright() as p:
     page.get_by_role("button", name="Save label").click()
     expect(page.locator("#notice")).to_have_text("Session label saved.")
     expect(page.locator(".label-box .section-label")).to_contain_text("benign")
+    expect(page.locator("#label-saved")).to_contain_text("Saved as benign")  # visible confirmation inside the dialog
     page.locator("#close-session").click()
     page.locator("#clear-filters").click()
     page.locator('[data-view="findings"]').click()

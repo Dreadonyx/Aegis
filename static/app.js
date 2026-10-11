@@ -10,7 +10,10 @@ const names = {
   'cowrie.session.connect': 'Session connected', 'cowrie.login.failed': 'Authentication failed',
   'cowrie.login.success': 'Honeypot login accepted', 'cowrie.command.input': 'Shell input observed',
   'cowrie.session.file_download': 'File download recorded', 'cowrie.session.closed': 'Session closed',
-  'cowrie.session.file_upload': 'File upload recorded', 'suricata.alert': 'IDS alert (Suricata)'
+  'cowrie.session.file_upload': 'File upload recorded', 'suricata.alert': 'IDS alert (Suricata)',
+  'cowrie.client.version': 'Client version sent', 'cowrie.client.kex': 'Key exchange offered', 'cowrie.client.fingerprint': 'Public key offered',
+  'cowrie.session.params': 'Session parameters', 'cowrie.command.success': 'Command ran', 'cowrie.command.failed': 'Command failed',
+  'cowrie.log.closed': 'Session recording closed', 'cowrie.direct-tcpip.request': 'Port-forward request', 'cowrie.session.file_download.failed': 'File download failed'
 };
 const titles = {
   incidents: ['Investigations', 'Investigation workspace', 'Turn observations into an evidence-backed incident story.'],
@@ -294,7 +297,8 @@ async function openSession(session, sensor) {
       <form id="label-form"><div class="label-choice">${['malicious', 'benign'].map(v => `<label><input type="radio" name="label" value="${v}" ${label?.label === v ? 'checked' : ''}> ${v === 'malicious' ? 'Malicious (alert-worthy)' : 'Benign (should stay quiet)'}</label>`).join('')}</div>
         <div class="label-types">${Object.entries(typeNames).map(([k, n]) => `<label><input type="checkbox" name="types" value="${k}" ${label?.types.includes(k) ? 'checked' : ''}> ${n}</label>`).join('')}</div>
         <input name="note" maxlength="500" placeholder="Why? (optional)" value="${esc(label?.note || '')}">
-        <div class="note-actions"><button class="text-button" type="button" id="clear-label" ${label ? '' : 'disabled'}>Clear label</button><button class="button primary" type="submit">Save label</button></div></form>
+        <div class="note-actions"><button class="text-button" type="button" id="clear-label" ${label ? '' : 'disabled'}>Clear label</button><button class="button primary" type="submit">Save label</button></div>
+        <p id="label-saved" class="label-saved ${label ? 'is-saved' : ''}" role="status">${label ? `✓ Saved as <strong>${esc(label.label)}</strong>${label.types.length ? ` (${label.types.map(x => esc(typeNames[x])).join(', ')})` : ''} at ${fmtTime(label.labeled_at)} UTC by ${esc(label.actor)}` : 'Not saved yet.'}</p></form>
       ${t.label_history.length ? `<details class="facts"><summary>Label history (${t.label_history.length})</summary><ul class="history">${t.label_history.map(h => `<li>${fmtDate(h.changed_at)} ${fmtTime(h.changed_at)} · ${esc(h.actor)}: ${esc(h.before?.label || 'none')} → ${esc(h.after?.label || 'none')}</li>`).join('')}</ul></details>` : ''}
     </section>`}
     ${t.findings.length ? `<h3 class="section-label">Linked findings <span>${t.findings.length}</span></h3>${t.findings.map(f => `<div class="finding-row">${severityPill(f.severity)} <strong>${esc(f.name)}</strong> <span class="technique">${esc(f.id)}</span>${f.incident_id ? ` <button class="text-button" data-open-incident="${esc(f.incident_id)}">Open incident</button>` : ''}</div>`).join('')}` : ''}
