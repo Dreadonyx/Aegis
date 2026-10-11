@@ -27,10 +27,13 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def make_record(raw, source, locator=None):
-    """Parse one JSONL record (bytes, no line terminator). Raises ValueError or RecursionError."""
+def make_record(raw, source, locator=None, parser=None):
+    """Parse one JSONL record (bytes, no line terminator). Returns None when the parser does not apply to the
+    record (for example a non-alert EVE line). Raises ValueError or RecursionError when it is malformed."""
     parsed = json.loads(raw)
-    event = normalize(parsed, source)
+    event = (parser or normalize)(parsed, source)
+    if event is None:
+        return None
     # Idempotency key: the same record in the same dataset is stored once, however it is formatted.
     canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return dict(event=event, raw=bytes(raw), raw_sha256=sha256(raw), key=sha256(f"{source}\0{canonical}".encode()),
@@ -42,10 +45,10 @@ def quarantine(line, locator, reason):
     return dict(locator=locator, reason=reason[:200], line_sha256=sha256(line), line_bytes=len(line))
 
 
-def read_batch(stream, offset=0, discarding=False, source="live", limit=BATCH_LINES):
+def read_batch(stream, offset=0, discarding=False, source="live", limit=BATCH_LINES, parser=None):
     """Read up to `limit` complete lines from an open binary stream. An incomplete final line is left
-    unread so the writer can finish it. Returns (records, next_offset, discarding, errors)."""
-    records, errors = [], []
+    unread so the writer can finish it. Returns (records, next_offset, discarding, errors, skipped)."""
+    records, errors, skipped = [], [], 0
     stream.seek(offset)
     for _ in range(limit):
         start = offset
@@ -68,16 +71,21 @@ def read_batch(stream, offset=0, discarding=False, source="live", limit=BATCH_LI
         if not body.strip():
             continue
         try:
-            records.append(make_record(body, source, f"offset:{start}"))
+            record = make_record(body, source, f"offset:{start}", parser)
         except (ValueError, RecursionError) as error:
             errors.append(quarantine(body, f"offset:{start}", str(error) or type(error).__name__))
-    return records, offset, discarding, errors
+            continue
+        if record is None:
+            skipped += 1
+        else:
+            records.append(record)
+    return records, offset, discarding, errors, skipped
 
 
 def read_log_batch(path, offset=0, discarding=False):
     """Compatibility helper: canonical events only, plus a count of rejected lines."""
     with open(path, "rb") as stream:
-        records, offset, discarding, errors = read_batch(stream, offset, discarding)
+        records, offset, discarding, errors, _ = read_batch(stream, offset, discarding)
     return [r["event"] for r in records], offset, discarding, len(errors)
 
 
@@ -106,8 +114,9 @@ class Collector:
     """Tail one Cowrie JSONL file. The checkpoint (file identity + byte offset) is committed in the
     same transaction as the events it covers, so a crash or storage failure rereads, never skips."""
 
-    def __init__(self, store, path, source_id="cowrie-live", on_commit=None):
+    def __init__(self, store, path, source_id="cowrie-live", on_commit=None, parser=None, source_type="cowrie"):
         self.store, self.path, self.source_id = store, Path(path), source_id
+        self.parser, self.source_type = parser, source_type
         self.on_commit = on_commit  # detection hook; it must handle its own failures
         self.stream = self.identity = None
         self.offset, self.discarding = 0, False
@@ -119,10 +128,10 @@ class Collector:
         self.status = dict(state="starting", detail="Not polled yet", last_read_at=None, last_commit_at=None,
                            last_error_at=None, consecutive_failures=0, worker_restarts=0)
         # Process-lifetime counters for metrics; durable totals live in the sources table.
-        self.counters = dict(lines_read=0, records_committed=0, lines_quarantined=0, batches_committed=0, last_batch_seconds=0.0)
+        self.counters = dict(lines_read=0, records_committed=0, lines_quarantined=0, lines_skipped=0, batches_committed=0, last_batch_seconds=0.0)
 
     def origin(self):
-        return dict(mode="live", source_id=self.source_id, source_type="cowrie", file_id=self.identity)
+        return dict(mode="live", source_id=self.source_id, source_type=self.source_type, file_id=self.identity)
 
     def _open(self, path):
         stream = open(path, "rb")
@@ -183,7 +192,7 @@ class Collector:
         if not rotated and size < self.offset:
             self.offset, self.discarding = 0, False
             self.pending["truncations"] += 1
-        records, offset, discarding, errors = read_batch(self.stream, self.offset, self.discarding)
+        records, offset, discarding, errors, skipped = read_batch(self.stream, self.offset, self.discarding, parser=self.parser)
         finished = rotated and offset == self.offset and not records and not errors
         if finished and size > offset:
             # A rotated file will never receive the rest of its final line.
@@ -195,7 +204,8 @@ class Collector:
             self.store.commit(records, self.origin(), errors,
                               dict(file_id=self.identity, offset=offset, discarding=discarding, **self.pending))
             self.status["last_commit_at"] = datetime.now(timezone.utc).isoformat()
-            self.counters["lines_read"] += len(records) + len(errors) - len(self.pending_errors)
+            self.counters["lines_read"] += len(records) + len(errors) + skipped - len(self.pending_errors)
+            self.counters["lines_skipped"] += skipped
             self.counters["records_committed"] += len(records)
             self.counters["lines_quarantined"] += len(errors) - len(self.pending_errors)
             self.counters["batches_committed"] += 1

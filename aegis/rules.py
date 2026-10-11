@@ -28,7 +28,8 @@ DEFAULT_CONFIG = {
     "ml_max_model_age_days": 90,
     "disabled_rules": [],
 }
-RULE_IDS = ("AUTH-001", "AUTH-002", "INT-001", "DISC-001", "XFER-001", "XFER-002")
+RULE_IDS = ("AUTH-001", "AUTH-002", "INT-001", "DISC-001", "XFER-001", "XFER-002", "EXT-001")
+FLOW_MATCH_SECONDS = 300
 SEQUENCE_IDS = ("SEQ-001", "SEQ-002")
 STAT_IDS = ("STAT-001", "STAT-002", "STAT-003", "STAT-004")
 ML_IDS = ("ML-001",)
@@ -101,6 +102,11 @@ def catalog(config):
         rule(id="XFER-001", name="File download recorded", severity="high", technique="T1105", category="ingress-tool-transfer",
              severity_rationale="Captured downloads are often follow-on tooling; the file has not been executed or classified.",
              description="Cowrie reports a completed download with a captured file digest. The URL is absent for stdin or redirect captures. This does not establish payload execution or maliciousness."),
+        rule(id="EXT-001", name="External IDS alert (Suricata)", severity="medium", technique=None, category="external-ids",
+             severity_rationale="Severity follows the sensor: EVE severity 1 is high, 2 is medium, 3 or more is low (rule priority, 1 highest).",
+             description="A Suricata alert imported read-only. It joins a honeypot session only when address and source port match in either "
+                         f"direction within {FLOW_MATCH_SECONDS} seconds; a shared address alone is reported as a weak fact. Aegis did not block "
+                         "anything; the alert action is as the sensor reported it."),
         rule(id="XFER-002", name="File upload recorded", severity="high", technique="T1105", category="ingress-tool-transfer",
              severity_rationale="Files pushed over SCP or SFTP are often tooling; the file has not been executed or classified.",
              description="Cowrie reports a file uploaded into the honeypot over SCP or SFTP. This does not establish payload execution or maliciousness."),
@@ -281,7 +287,42 @@ def rule_findings(events, config):
                 facts["with_url"] = sum(1 for e in transfers if e.get("url"))
             explanation = f"Cowrie recorded {len(transfers)} completed file {noun}(s) in session {anchor['session']} with {len(digests)} distinct digest(s)."
             findings.append(make_finding(meta[rule_id], anchor, transfers, facts, explanation, anchor_key(anchor, rule_id)))
+    if enabled("EXT-001"):
+        findings.extend(ids_findings(meta["EXT-001"], events))
     return findings
+
+
+def ids_findings(meta, events):
+    from aegis.suricata import severity
+    connects, by_address = {}, {}
+    for e in events:
+        if e["eventid"] == "cowrie.session.connect" and e.get("src_port") is not None:
+            connects.setdefault((e["source"], e["src_ip"], e["src_port"]), []).append(e)
+        if e["eventid"].startswith("cowrie."):
+            by_address.setdefault((e["source"], e["src_ip"]), []).append(e)
+    grouped = {}
+    for alert in (e for e in events if e["eventid"] == "suricata.alert"):
+        grouped.setdefault((session_key(alert), alert["signature_id"]), []).append(alert)
+    for (key, sid), alerts in grouped.items():
+        first = alerts[0]
+        match = None
+        for ip, port in ((first["src_ip"], first.get("src_port")), (first.get("dst_ip"), first.get("dst_port"))):
+            for candidate in connects.get((first["source"], ip, port), []) if port is not None else []:
+                if abs(ts(candidate) - ts(first)) <= FLOW_MATCH_SECONDS:
+                    match = match or candidate
+        nearby = {session_key(c) for ip in (first["src_ip"], first.get("dst_ip")) for c in by_address.get((first["source"], ip), [])
+                  if abs(ts(c) - ts(first)) <= FLOW_MATCH_SECONDS} - ({session_key(match)} if match else set())
+        level = severity(first)
+        facts = {"signature_id": sid, "signature": first.get("signature"), "category": first.get("category"), "alerts": len(alerts),
+                 "sensor_severity": first.get("sensor_severity"), "aegis_severity": level,
+                 "alert_action_reported": first.get("alert_action"), "verdict_action_reported": first.get("verdict_action"),
+                 "flow_match": {"session": match["session"], "link": "address and source port within "
+                                f"{FLOW_MATCH_SECONDS} s (strong)"} if match else None,
+                 "same_address_sessions": len(nearby), "same_address_note": "Weak: a shared address does not establish the same client or flow."}
+        explanation = (f"Suricata reported {len(alerts)} alert(s) for signature {sid} ({first.get('signature') or 'no signature text'}) "
+                       f"from {first['src_ip']} to {first.get('dst_ip')}" + (f", matching honeypot session {match['session']}." if match else
+                       f"; no honeypot session matched by address and port ({len(nearby)} address-only overlap(s))."))
+        yield make_finding({**meta, "severity": level}, first, alerts + ([match] if match else []), facts, explanation, f"{key}:{sid}")
 
 
 def anchor_key(event, rule_id):

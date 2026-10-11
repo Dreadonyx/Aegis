@@ -43,6 +43,8 @@ Replays are idempotent. Demo and imported telemetry have separate namespaces and
 - Separate `demo`, `imported`, and `live` datasets; versioned schema migrations; liveness, readiness, and per-source health endpoints.
 - Six versioned, configurable rules (repeated failures, login after failures, shell input after login, discovery commands, completed downloads, SCP/SFTP uploads) and two ordered sequences (login → discovery → transfer; failures → login → shell input). Every finding stores its exact evidence, machine-readable facts, rule version, and severity rationale. See the [detection reference](docs/DETECTION.md).
 - Statistical signals (median/MAD robust baselines, no lookahead, explicit cold-start status): sensor event-rate spikes, username breadth per source, command volume and duration per session. Signals are low severity, carry a robust z-score kept apart from severity, and never create incidents on their own.
+- Read-only Suricata EVE adapter: alerts imported by upload or live collector, correlated with honeypot sessions only on address-and-port matches, never presented as blocked traffic.
+- Evidence-grounded AI drafts (optional, local Ollama): citations required, invented evidence IDs and uncited claims flagged, hypotheses marked, requests logged without telemetry or generated text.
 - Optional Isolation Forest scoring (off by default): manual, window-bounded training with a manifest; integrity-checked, fail-closed loading; scores reported as training percentiles, never probabilities. See the [ML section](docs/DETECTION.md#optional-ml-layer-c).
 - Investigation workspace: event filters (type, session, sensor, source, UTC time range) with a spreadsheet-safe CSV export; per-event provenance with the original record (passwords masked); a session view with ordered timeline, linked findings, and analyst labels with history; Findings and Sources views.
 - Labeled-dataset export of real telemetry (`python -m aegis.labels export`) and ML threshold calibration on later labeled data (`python -m aegis.ml calibrate`).
@@ -94,6 +96,8 @@ The app binds to `127.0.0.1:8000`. SQLite defaults to `data/aegis.sqlite3`. Opti
 | `AEGIS_BIND` | HTTP listen address | `127.0.0.1` |
 | `AEGIS_COWRIE_LOG` | Local Cowrie JSONL file to follow | Disabled |
 | `AEGIS_SOURCE_ID` | Provenance name for the live collector | `cowrie-live` |
+| `AEGIS_SURICATA_EVE` | Suricata `eve.json` to follow read-only (alerts only) | Disabled |
+| `AEGIS_SURICATA_SENSOR` | Sensor name for EVE records without a `host` field | `suricata` |
 | `AEGIS_ML_MODEL_DIR` | Verified Isolation Forest model directory (used only with `"ml_enabled": true`) | Unset |
 | `AEGIS_DETECTION_CONFIG` | JSON file with detection thresholds ([reference](docs/DETECTION.md#configuration)) | Built-in defaults |
 
@@ -173,6 +177,7 @@ GET endpoints are available on the local dashboard. Mutations require the dashbo
 | `GET /api/evaluation` | Non-mutating synthetic regression evaluation |
 | `POST /api/replay` | Idempotent demo ingestion |
 | `POST /api/import` | Atomic multipart JSONL import (`file`) |
+| `POST /api/v1/imports?format=suricata-eve&sensor=...` | Atomic Suricata EVE upload; non-alert records skipped and counted |
 | `GET /api/v1/health/live` | Process liveness |
 | `GET /api/v1/health/ready` | Database, schema version, and collector state; 503 when not ready |
 | `GET /api/v1/sources` | Per-source checkpoint, counters, last event, lag, and collector state |

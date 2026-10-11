@@ -9,7 +9,8 @@ const fmtDate = t => new Date(t).toISOString().slice(0, 10);
 const names = {
   'cowrie.session.connect': 'Session connected', 'cowrie.login.failed': 'Authentication failed',
   'cowrie.login.success': 'Honeypot login accepted', 'cowrie.command.input': 'Shell input observed',
-  'cowrie.session.file_download': 'File download recorded', 'cowrie.session.closed': 'Session closed'
+  'cowrie.session.file_download': 'File download recorded', 'cowrie.session.closed': 'Session closed',
+  'cowrie.session.file_upload': 'File upload recorded', 'suricata.alert': 'IDS alert (Suricata)'
 };
 const titles = {
   incidents: ['Investigations', 'Investigation workspace', 'Turn observations into an evidence-backed incident story.'],
@@ -179,7 +180,7 @@ async function loadDetail(id) {
     <div id="ai-output"></div><h3 class="section-label timeline-title">Evidence timeline <span>${incident.events.length} related events</span></h3>
     <div class="timeline">${incident.events.map(e => `<article class="timeline-event" id="event-${e.id}"><time datetime="${esc(e.timestamp)}" title="${esc(e.timestamp)}">${fmtTime(e.timestamp)}</time><div>
       <button class="event-link" data-event="${e.id}">${esc(names[e.eventid] || e.eventid)}</button>
-      ${e.input || e.url || e.username ? `<code>${esc(e.input || e.url || `User: ${e.username}`)}</code>` : ''}
+      ${e.input || e.url || e.username || e.signature ? `<code>${esc(e.input || e.url || (e.username ? `User: ${e.username}` : `Signature ${e.signature_id}: ${e.signature}`))}</code>` : ''}
       <span class="evidence-id">${esc(e.id)} · <button class="session-link" data-session="${esc(e.session)}" data-sensor="${esc(e.sensor)}">${esc(e.session)}</button>${e.link === 'source_address' ? ' <span class="link-tag">other session · address-linked</span>' : e.link === 'finding_session' ? ' <span class="link-tag">other session</span>' : ''}</span></div></article>`).join('')}</div>
     <section class="analyst-section"><h3 class="section-label">Analyst notebook <span>Saved with this incident</span></h3>
       <form id="note-form"><label for="note-text">Investigation note</label><textarea id="note-text" rows="3" maxlength="2000" required placeholder="What did you check? What explains this activity?">${esc(drafts.get(id) || '')}</textarea>
@@ -190,8 +191,10 @@ async function loadDetail(id) {
 }
 
 function renderAI(result) {
-  $('#ai-output').innerHTML = '<section class="ai-draft"><h3></h3><pre></pre></section>';
-  $('#ai-output h3').textContent = result.label; $('#ai-output pre').textContent = result.text;
+  const v = result.validation;
+  $('#ai-output').innerHTML = `<section class="ai-draft"><h3></h3>${v ? `<p class="ai-check ${esc(v.verdict)}"><strong>${esc(v.verdict.replace('_', ' '))}</strong> · ${esc(v.explanation)}
+    ${v.cited_valid} valid citation${v.cited_valid === 1 ? '' : 's'}${v.cited_invalid.length ? ` · invented IDs: ${v.cited_invalid.map(esc).join(', ')}` : ''}${v.uncited_statements ? ` · ${v.uncited_statements} uncited statement${v.uncited_statements === 1 ? '' : 's'}` : ''}</p>` : ''}<pre></pre></section>`;
+  $('#ai-output h3').textContent = result.label; $('#ai-output pre').textContent = visible(result.text);
 }
 
 function eventFilters() {
@@ -217,7 +220,7 @@ async function loadEvents() {
   $('#prev-page').disabled = data.page <= 1; $('#next-page').disabled = data.page >= data.pages;
   $('#event-rows').innerHTML = data.events.length ? data.events.map(e => `<tr><td>${fmtTime(e.timestamp)}<small>${fmtDate(e.timestamp)}</small></td>
     <td>${esc(e.src_ip)}<small><button class="session-link" data-session="${esc(e.session)}" data-sensor="${esc(e.sensor)}">${esc(e.session)}</button></small></td><td><button class="event-link" data-event="${e.id}">${esc(names[e.eventid] || e.eventid)}</button><small>${esc(e.id)}</small></td>
-    <td>${esc(e.input || e.url || e.username || '—')}</td></tr>`).join('') : '<tr><td colspan="4" class="table-empty">No matching events. Adjust your search, import telemetry, or replay the demo.</td></tr>';
+    <td>${esc(e.input || e.url || e.username || e.signature || '—')}</td></tr>`).join('') : '<tr><td colspan="4" class="table-empty">No matching events. Adjust your search, import telemetry, or replay the demo.</td></tr>';
 }
 
 async function loadEvaluation() {
@@ -291,7 +294,7 @@ async function openSession(session, sensor) {
     <h3 class="section-label timeline-title">Timeline <span>event order, UTC</span></h3>
     <div class="timeline">${t.events.map(e => `<article class="timeline-event"><time datetime="${esc(e.timestamp)}">${fmtTime(e.timestamp)}</time><div>
       <button class="event-link" data-event="${esc(e.id)}">${esc(names[e.eventid] || e.eventid)}</button>
-      ${e.input || e.url || e.username || e.client_version ? `<code>${esc(e.input || e.url || (e.username ? `User: ${e.username}` : e.client_version))}</code>` : ''}
+      ${e.input || e.url || e.username || e.client_version || e.signature ? `<code>${esc(e.input || e.url || (e.username ? `User: ${e.username}` : e.signature ? `Signature ${e.signature_id}: ${e.signature}` : e.client_version))}</code>` : ''}
       <span class="evidence-id">${esc(e.id)}</span></div></article>`).join('')}</div>`;
   visibleEvents = [...visibleEvents.filter(v => !t.events.some(e => e.id === v.id)), ...t.events];
 }
@@ -414,6 +417,17 @@ document.addEventListener('reset', event => {
   if (event.target.id === 'event-filters') setTimeout(() => { eventPage = 1; loadEvents().catch(e => notify(e.message, true)); });
 });
 ['finding-engine', 'finding-status'].forEach(id => $(`#${id}`).addEventListener('change', () => { findingPage = 1; loadFindings().catch(e => notify(e.message, true)); }));
+
+$('#eve-input').addEventListener('change', async event => {
+  const file = event.target.files[0]; if (!file) return;
+  try {
+    if (file.size > 2 * 1024 * 1024) throw new Error('Choose a file smaller than 2 MB.');
+    const form = new FormData(); form.append('file', file);
+    const result = await api('/api/v1/imports?format=suricata-eve', {method: 'POST', body: form});
+    source = 'imported'; selected = null; syncSource(); await load();
+    notify(`Imported ${result.inserted} Suricata alert${result.inserted === 1 ? '' : 's'}; skipped ${result.duplicates} duplicates and ${result.skipped_non_alert} non-alert EVE records. Read-only: nothing was blocked.`);
+  } catch (error) { notify(error.message, true); } finally { event.target.value = ''; }
+});
 
 $('#file-input').addEventListener('change', async event => {
   const file = event.target.files[0]; if (!file) return;

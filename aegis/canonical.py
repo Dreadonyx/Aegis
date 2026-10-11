@@ -33,6 +33,7 @@ EVENT_TYPES = {
     "cowrie.direct-tcpip.data": "tunnel_data",
     "cowrie.log.open": "tty_log",
     "cowrie.log.closed": "tty_log",
+    "suricata.alert": "ids_alert",
 }
 COMMAND_EVENTS = ("cowrie.command.input", "cowrie.command.success", "cowrie.command.failed")
 HEX = re.compile(r"^[0-9a-f]+$")

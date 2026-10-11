@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
 from aegis import statistics
+from aegis.suricata import normalize_eve
 from aegis.engine import DEFAULT, RULESET_VERSION, detect, normalize
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -26,6 +27,12 @@ def shell(second, text, session="evaluation", **fields):
 
 def download(second, session="evaluation", **fields):
     return record(second, session=session, eventid="cowrie.session.file_download", shasum="b" * 64, **fields)
+
+
+def ids_alert(second, src_port, flow=1):
+    return normalize_eve({"timestamp": (BASE + timedelta(seconds=second)).strftime("%Y-%m-%dT%H:%M:%S.%f+0000"), "flow_id": flow,
+                          "event_type": "alert", "src_ip": "192.0.2.90", "src_port": src_port, "dest_ip": "198.51.100.1", "dest_port": 22,
+                          "proto": "TCP", "alert": {"action": "allowed", "signature_id": 1000001, "signature": "Fixture signature", "severity": 1}}, "demo")
 
 
 def failures(count, spacing=5, start=0, **fields):
@@ -55,6 +62,10 @@ CASES = [
     ("Login then one shell command", [login(0), shell(1, "echo ok")], {"INT-001"}, 1),
     ("Accepted login alone is not shell activity", [login(0)], set(), 0),
     ("Shell input before the login does not count", [shell(0, "echo ok"), login(5)], set(), 0),
+    ("IDS alert matching a session's flow joins its incident",
+     [record(0, eventid="cowrie.session.connect", src_port=40001), shell(5, "uname"), ids_alert(3, 40001)], {"DISC-001", "EXT-001"}, 1),
+    ("IDS alert sharing only the address stays separate",
+     [record(0, eventid="cowrie.session.connect", src_port=40001), shell(5, "uname"), ids_alert(3, 50000, 2)], {"DISC-001", "EXT-001"}, 2),
     ("Shared address alone does not chain sessions", [login(0, "a"), shell(10, "uname", "b"), download(20, "c")], {"DISC-001", "XFER-001"}, 2),
 ]
 

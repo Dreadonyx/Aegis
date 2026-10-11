@@ -21,7 +21,7 @@ from pathlib import Path
 
 LABEL_TYPES = ("credential_access", "discovery", "transfer", "intrusion_sequence", "anomaly")
 RULE_TYPES = {"AUTH-001": "credential_access", "AUTH-002": "credential_access", "DISC-001": "discovery", "XFER-001": "transfer",
-              "XFER-002": "transfer", "SEQ-001": "intrusion_sequence", "SEQ-002": "intrusion_sequence"}
+              "XFER-002": "transfer", "SEQ-001": "intrusion_sequence", "SEQ-002": "intrusion_sequence"}  # INT-001 and EXT-001 imply no type
 DEFINITIONS = {"malicious": "Alert-worthy activity in the analyst's judgment.",
                "benign": "Activity that should not raise an alert (unsolicited but not alert-worthy, such as scanning)."}
 

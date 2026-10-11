@@ -1625,3 +1625,29 @@ dialog pre {
 .finding-links .session-link, .finding-links .text-button, .finding-row .text-button {
   font-size:10px
 }
+
+.ai-check {
+  font-size:11px;
+  line-height:1.6;
+  border-radius:5px;
+  padding:8px 12px;
+  background:#fbf3e4;
+  color:#6b5a3e
+}
+.ai-check.grounded {
+  background:#edf6f1;
+  color:#32644f
+}
+.ai-check.unverified {
+  background:#fbeaea;
+  color:#8a2f2f
+}
+.page-heading .actions {
+  flex-wrap:wrap;
+  justify-content:flex-end
+}
+@media (max-width: 640px) {
+  .page-heading .actions {
+    justify-content:flex-start
+  }
+}

@@ -79,12 +79,12 @@ with sync_playwright() as p:
     page.locator('[data-view="sources"]').click()
     expect(page.locator(".source-card")).to_have_count(1)
     page.locator('[data-view="rules"]').click()
-    expect(page.locator(".rule-row")).to_have_count(12)
+    expect(page.locator(".rule-row")).to_have_count(13)
     page.locator('[data-view="lab"]').click()
     page.locator("#validate").click()
     expect(page.locator(".evaluation-grid")).to_be_visible()
-    expect(page.locator("#check-summary")).to_have_text("36 / 36 passed")
-    expect(page.locator("#check-results .check-row")).to_have_count(36)
+    expect(page.locator("#check-summary")).to_have_text("38 / 38 passed")
+    expect(page.locator("#check-results .check-row")).to_have_count(38)
     expect(page.locator("#baseline-results .check-row")).to_have_count(4)  # cold start shown per metric
     expect(page.locator("#stats-status")).to_contain_text("cold start")
     expect(page.locator("#metric-events")).to_have_text("18")
@@ -106,4 +106,4 @@ with sync_playwright() as p:
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Mobile page overflows"
     assert not errors, errors
     browser.close()
-print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, event filters and CSV export, provenance, session labeling, findings and sources views, 36 regression checks, cold-start baselines, import and control-character escaping, mobile layout.")
+print("Browser smoke passed: replay, status and note persistence, draft preservation, evidence dialog, both exports, search, workflow filters, event filters and CSV export, provenance, session labeling, findings and sources views, 38 regression checks, cold-start baselines, import and control-character escaping, mobile layout.")

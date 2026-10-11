@@ -31,7 +31,8 @@ def session_features(events, config):
     """One feature row per session, with the identifiers needed to cite its evidence."""
     sessions = {}
     for e in sorted(events, key=order):
-        sessions.setdefault(session_key(e), []).append(e)
+        if e["eventid"].startswith("cowrie."):  # session features describe honeypot sessions, not IDS flows
+            sessions.setdefault(session_key(e), []).append(e)
     names = set(config["discovery_commands"])
     rows = []
     for key, items in sessions.items():

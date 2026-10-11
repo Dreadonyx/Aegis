@@ -297,3 +297,19 @@ Gate change: "Event provenance and synthetic/live separation are visible and pre
 `aegis/realdata.py` runs a reproducible evaluation on real Cowrie logs: criteria labels, a forward-chaining ML backtest (training only on earlier sessions), a single time split, and Wilson intervals. On 170 real sessions (6 alert-worthy), frozen rules caught 2 of 5 out-of-sample intrusions with no false alarms; rules OR real-data ML with thresholds from earlier labels caught 3 of 5. Fixes found along the way: sensor-level statistical findings are no longer attributed to sessions in evaluation; log discovery recurses into the per-host folder `aws s3 sync` creates. INT-001 (shell input after an accepted login) closes the observed gap; its 6/6 is in-sample and near-circular with the labeling criteria. Details: `docs/REALDATA_EVALUATION.md`.
 
 Gate status: "Labeled detection evaluation reports meaningful metrics and limitations" stays ◐. The harness and a first real measurement exist, but labels are automated and positives are few; independent labels and the full collection through 2026-10-28 are required.
+
+---
+
+## Phase 6 progress (2026-10-11)
+
+Implemented, with tests:
+
+- `aegis/suricata.py`: EVE alert mapping checked against the Suricata EVE format reference and rule `priority` docs (1 is highest; EVE `severity` → high, medium, low is a documented assumption). Non-alert EVE types are skipped and counted; malformed alerts are rejected. `alert.action` and `verdict.action` are recorded only as reported.
+- Ingestion takes pluggable parsers: atomic EVE upload (`/api/v1/imports?format=suricata-eve`), an optional live EVE collector (`AEGIS_SURICATA_EVE`), several collectors reported in readiness, sources, and metrics (including skipped-line counts).
+- EXT-001 correlates alerts with honeypot sessions only on address-and-port matches within 300 seconds; address-only overlaps are weak facts and never merge incidents. IDS flows are excluded from ML session features.
+- AI drafts (`aegis/assistant.py`): required citations, explicit hypotheses, validation that flags invented evidence IDs, uncited claims, or missing citations, and logs of model, timing, evidence count, and verdict without telemetry or generated text.
+- The safe response roadmap is documented; no blocking or remediation path exists.
+
+Verification: 137 tests and 38 fixtures pass. Six of seven mutations were caught. The seventh (removing EVE offset normalization) survived because Python 3.12 and 3.14 already parse EVE's `+0100` offsets (verified in the production image), so the normalization was dead code and was removed.
+
+Gate: "No automated block/remediation path exists by default" stays ✓ (none exists at all).

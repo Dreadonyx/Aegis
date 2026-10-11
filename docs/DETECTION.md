@@ -18,12 +18,24 @@ Detection is layered: canonical events → deterministic rules (Layer A), sequen
 |---|---|---|---|---|
 | AUTH-001 | 2 | medium | ≥ `auth_failure_threshold` failed logins within `auth_failure_window_seconds` | source address (+ sensor by default); overlapping windows merge into one finding per burst |
 | INT-001 | 2 | medium | an accepted login followed by shell input (or a command Cowrie reports as failed) in the same session | one finding per session; added 2026-10-11 after real data showed one-command bots evading every other rule |
+| EXT-001 | 2 | from sensor | a Suricata EVE alert (imported read-only) | one finding per flow and signature; joins a honeypot session only on an address-and-source-port match within 300 s (either direction) |
 | AUTH-002 | 2 | high | accepted login with ≥ `login_failure_threshold` earlier failures within `login_lookback_seconds` | same as AUTH-001; one finding per login session |
 | DISC-001 | 2 | low | shell input runs a command in `discovery_commands` (command position only; quoted text and stdin ignored) | one finding per session |
 | XFER-001 | 2 | high | `cowrie.session.file_download` (completed; failed downloads never match) | one finding per session |
 | XFER-002 | 2 | high | `cowrie.session.file_upload` (SCP/SFTP) | one finding per session |
 
 Severity is rule priority with a stated rationale (shown on the rules page). It is not a probability.
+
+## Suricata EVE (optional, read-only)
+
+`aegis/suricata.py` maps EVE `alert` records separately from Cowrie parsing; other EVE types are skipped and counted. Kept fields: time (EVE's `+0100` offsets are accepted), flow ID (as the session `flow-<id>`), addresses and ports, protocol, signature ID, revision, signature, category, severity, `alert.action`, and `verdict.action` when present. The sensor name comes from EVE `host` when present, otherwise the configured name.
+
+- **Severity:** EVE `severity` carries the rule priority, where 1 is the highest (Suricata rule documentation); EXT-001 maps 1 to high, 2 to medium, and 3 or more to low. The EVE format page does not define the field, so check this against your ruleset.
+- **No blocking claims:** Aegis never blocks. The alert and verdict actions are shown as reported by the sensor. The EVE reference notes that `alert.action` is not necessarily the final verdict.
+- **Correlation:** an alert joins a honeypot session only when address and source port match in either direction within 300 seconds. A shared address alone is reported as a weak fact and never merges incidents.
+- **Ingestion:** upload with `POST /api/v1/imports?format=suricata-eve` (atomic, at most 5,000 lines), or follow a live `eve.json` with `AEGIS_SURICATA_EVE` (checkpointed like the Cowrie collector; source `suricata-eve`).
+
+**Response roadmap (not implemented by design):** read-only import (done) → correlation with honeypot sessions (done) → recommended actions with evidence and expiry → authenticated human approval for any enforcement → only then tightly scoped automation with allowlists, maximum duration, audit, rollback, and an emergency disable switch. No part of Aegis changes firewall rules or blocks addresses.
 
 ## Sequences (Layer D)
 

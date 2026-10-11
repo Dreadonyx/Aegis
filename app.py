@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -22,11 +23,13 @@ from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from aegis.demo import demo_records, EXPECTED_NEGATIVE, EXPECTED_POSITIVE
+from aegis import assistant
 from aegis.analysis import Analyzer, load_config
 from aegis.engine import RULESET_VERSION, detect, report
 from aegis.statistics import describe
 from aegis.evaluate import evaluate
 from aegis.labels import LABEL_TYPES, redact, suggest
+from aegis.suricata import normalize_eve
 from aegis.rules import session_key
 from aegis.ingestion import Collector, make_record, read_log_batch, validate_source  # noqa: F401  (read_log_batch: public helper)
 from aegis.store import TRANSITIONS, Store, TransitionError
@@ -106,11 +109,17 @@ def create_app(database=None, detection_config=None, model_dir=None):
             raise ValueError("source must be demo, imported, or live")
         return source
 
+    def collectors():
+        found = list(app.extensions.get("collectors", []))
+        legacy = app.extensions.get("collector")
+        return found + ([legacy] if legacy and legacy not in found else [])
+
     def collector_status():
-        collector = app.extensions.get("collector")
-        if not collector:
+        running = collectors()
+        if not running:
             return "Not configured"
-        return f"{collector.status['state'].replace('_', ' ').capitalize()}: {collector.status['detail']}"
+        return " · ".join(f"{c.source_id}: {c.status['state'].replace('_', ' ')} ({c.status['detail']})" if len(running) > 1
+                          else f"{c.status['state'].replace('_', ' ').capitalize()}: {c.status['detail']}" for c in running)
 
     def incident_by_id(incident_id):
         dataset = source_arg()
@@ -358,17 +367,18 @@ def create_app(database=None, detection_config=None, model_dir=None):
     def ready():
         checks = {"database": "ok", "schema_version": store.schema_version()}
         store.usage()
-        collector = app.extensions.get("collector")
-        if collector:
-            checks["collector"] = collector.status["state"]
-            if not collector.healthy():
+        running = collectors()
+        if running:
+            checks["collector"] = running[0].status["state"]
+            checks["collectors"] = {c.source_id: c.status["state"] for c in running}
+            if not all(c.healthy() for c in running):
                 return jsonify(status="not_ready", checks=checks), 503
         return jsonify(status="ready", checks=checks)
 
     def source_health(source):
-        collector = app.extensions.get("collector")
+        collector = next((c for c in collectors() if c.source_id == source["source_id"]), None)
         runtime = None
-        if collector and collector.source_id == source["source_id"]:
+        if collector:
             runtime = {k: collector.status[k] for k in ("state", "detail", "last_read_at", "last_error_at", "consecutive_failures", "worker_restarts")}
             runtime["bytes_behind"] = collector.bytes_behind()
         lag = None
@@ -431,13 +441,13 @@ def create_app(database=None, detection_config=None, model_dir=None):
         metric("aegis_events_stored", "gauge", "Canonical events stored across datasets.", [({}, usage["events"])])
         metric("aegis_events_limit", "gauge", "Configured canonical event cap.", [({}, usage["limit"])])
         metric("aegis_raw_evidence_records", "gauge", "Hash-chained raw evidence records.", [({}, store.raw_count())])
-        collector = app.extensions.get("collector")
-        if collector:
+        for collector in collectors():
             c, who = collector.counters, {"source_id": collector.source_id}
             metric("aegis_collector_up", "gauge", "1 when the collector is healthy.", [(who, int(collector.healthy()))])
             metric("aegis_collector_lines_read_total", "counter", "Lines read since process start.", [(who, c["lines_read"])])
             metric("aegis_collector_records_committed_total", "counter", "Records committed since process start.", [(who, c["records_committed"])])
             metric("aegis_collector_lines_quarantined_total", "counter", "Lines quarantined since process start.", [(who, c["lines_quarantined"])])
+            metric("aegis_collector_lines_skipped_total", "counter", "Lines the parser does not apply to (for example non-alert EVE records).", [(who, c["lines_skipped"])])
             metric("aegis_collector_batches_total", "counter", "Batches committed since process start.", [(who, c["batches_committed"])])
             metric("aegis_collector_last_batch_seconds", "gauge", "Read-to-commit time of the last batch.", [(who, c["last_batch_seconds"])])
             metric("aegis_collector_bytes_behind", "gauge", "Unread bytes in the current log file.", [(who, collector.bytes_behind())])
@@ -460,6 +470,45 @@ def create_app(database=None, detection_config=None, model_dir=None):
         return jsonify(inserted=added, duplicates=len(events)-added,
             evaluation=dict(true_positives=tp, false_positives=fp, false_negatives=fn, true_negatives=tn,
                 scope="Five synthetic sessions only; not an estimate of real-world performance."))
+
+    @app.post("/api/v1/imports")
+    def import_eve_or_cowrie():
+        """Atomic upload of Cowrie JSONL (format=cowrie) or Suricata EVE JSON (format=suricata-eve). EVE lines that
+        are not alerts are skipped and counted."""
+        fmt = request.args.get("format", "cowrie")
+        if fmt == "cowrie":
+            return import_events()
+        if fmt != "suricata-eve":
+            raise ValueError("format must be cowrie or suricata-eve")
+        uploaded = request.files.get("file")
+        if not uploaded:
+            raise ValueError("Choose a Suricata EVE JSON file")
+        content = uploaded.read()
+        try:
+            lines = content.decode("utf-8-sig").splitlines()
+        except UnicodeDecodeError:
+            raise ValueError("The file must be UTF-8 JSON lines") from None
+        if len(lines) > 5000:
+            raise ValueError("Import up to 5,000 lines at a time")
+        sensor = (request.args.get("sensor") or "suricata")[:200]
+        records, skipped = [], 0
+        for n, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                record = make_record(line.encode(), "imported", f"line:{n}", lambda raw, src: normalize_eve(raw, src, sensor))
+            except (ValueError, RecursionError) as error:
+                raise ValueError(f"Line {n}: invalid EVE record. {str(error)[:200]}") from None
+            if record is None:
+                skipped += 1
+            else:
+                records.append(record)
+        if not records:
+            raise ValueError(f"The file contains no Suricata alerts ({skipped} other EVE records skipped)")
+        result = store.commit(records, dict(mode="import", source_id="upload-suricata", source_type="suricata",
+                                            file_id="upload:" + hashlib.sha256(content).hexdigest()[:16]))
+        analyzer.after_commit(records)
+        return jsonify(inserted=result["inserted"], duplicates=result["duplicates"], skipped_non_alert=skipped)
 
     @app.post("/api/import")
     def import_events():
@@ -556,20 +605,24 @@ def create_app(database=None, detection_config=None, model_dir=None):
             return jsonify(error="Ollama must use an HTTP loopback address."), 503
         if not ai_lock.acquire(blocking=False):
             return jsonify(error="An AI report is already generating. Try again shortly."), 429
+        started = time.monotonic()
+        prompt = assistant.build_prompt(incident)
         try:
-            # Only deterministic findings and evidence IDs go to the model. No attacker-controlled commands.
-            evidence = [{"rule": f["id"], "finding": f["name"], "meaning": f["description"], "evidence_ids": f["evidence_ids"][:20]} for f in incident["findings"]]
+            # Only findings (templates, rationale, evidence IDs) go to the model. No attacker-entered command text.
             payload = {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": 700},
-                "system": "You are a defensive SOC analyst. Summarize the supplied rule findings, cite their evidence IDs, state uncertainty, and suggest manual investigation. Do not invent facts or probabilities. Honeypot observations are not proof of real compromise. No offensive instructions.",
-                "prompt": json.dumps({"synthetic_demo": incident["source"] == "demo", "findings": evidence})}
+                       "system": assistant.SYSTEM, "prompt": json.dumps(prompt)}
             req = urllib.request.Request(endpoint.rstrip("/") + "/api/generate", json.dumps(payload).encode(), {"Content-Type": "application/json"})
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
             with opener.open(req, timeout=float(os.environ.get("AEGIS_OLLAMA_TIMEOUT", "45"))) as response:
                 result = json.loads(response.read(100000))
             if not isinstance(result, dict) or not isinstance(result.get("response"), str) or not result["response"].strip():
                 raise ValueError("Empty model response")
-            return jsonify(text=result["response"], model=model, label="AI draft — verify all claims against the evidence")
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            check = assistant.validate(result["response"], prompt)
+            app.logger.info(assistant.log_entry(model, incident["id"], prompt, "ok", time.monotonic() - started, check["verdict"]))
+            return jsonify(text=result["response"], model=model, validation=check,
+                           label="AI draft: an assistant's summary, not a detection. Verify every claim against the cited evidence.")
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
+            app.logger.warning(assistant.log_entry(model, incident["id"], prompt, type(error).__name__, time.monotonic() - started))
             return jsonify(error="Local model request failed. Check Ollama and the configured model, then retry."), 502
         finally:
             ai_lock.release()
@@ -587,13 +640,21 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def follow_log(app, path, source_id=None):
-    """Start the live collector; its state is reported by /api/v1/health/ready and /api/v1/sources."""
+def follow_log(app, path, source_id=None, parser=None, source_type="cowrie"):
+    """Start a live collector; its state is reported by /api/v1/health/ready and /api/v1/sources."""
     source_id = source_id or os.environ.get("AEGIS_SOURCE_ID", "cowrie-live")
-    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id, on_commit=app.extensions["analyzer"].after_live_commit)
-    app.extensions["collector"] = collector.start()
+    collector = Collector(app.extensions["store"], validate_source(path, source_id), source_id,
+                          on_commit=app.extensions["analyzer"].after_live_commit, parser=parser, source_type=source_type)
+    app.extensions.setdefault("collectors", []).append(collector.start())
+    app.extensions.setdefault("collector", collector)
     atexit.register(collector.stop)
     return collector
+
+
+def follow_eve(app, path):
+    """Optional read-only Suricata EVE collector (AEGIS_SURICATA_EVE) into the live dataset."""
+    sensor = os.environ.get("AEGIS_SURICATA_SENSOR", "suricata")
+    return follow_log(app, path, "suricata-eve", lambda raw, source: normalize_eve(raw, source, sensor), "suricata")
 
 
 if __name__ == "__main__":
@@ -601,9 +662,11 @@ if __name__ == "__main__":
     # finishes its current batch instead of being killed mid-poll.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     app = create_app()
-    if os.environ.get("AEGIS_COWRIE_LOG"):
-        try:
+    try:
+        if os.environ.get("AEGIS_COWRIE_LOG"):
             follow_log(app, os.environ["AEGIS_COWRIE_LOG"])
-        except ValueError as error:
-            sys.exit(f"Aegis configuration error: {error}")
+        if os.environ.get("AEGIS_SURICATA_EVE"):
+            follow_eve(app, os.environ["AEGIS_SURICATA_EVE"])
+    except ValueError as error:
+        sys.exit(f"Aegis configuration error: {error}")
     app.run(host=os.environ.get("AEGIS_BIND", "127.0.0.1"), port=int(os.environ.get("AEGIS_PORT", "8000")), debug=False)
