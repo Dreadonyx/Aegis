@@ -36,6 +36,25 @@ Time separation (`--test-after`) runs detection over the whole dataset, so stati
 
 The dataset name, version, and SHA-256 of each file (so results are tied to an exact dataset); session counts and class balance; how many sessions were unlabeled or how many lines failed validation; and limitations, including small-sample and class-imbalance warnings and a synthetic-data warning. Do not quote a precision or recall figure without that context.
 
+## Labeling your own telemetry
+
+1. Open a session (from any event, finding, or incident timeline) and set **Malicious (alert-worthy)** or **Benign (should stay quiet)**, with optional types and a note. Every change records who made it and when.
+2. A suggestion appears when rule findings or the session's shape make one obvious. It is never applied automatically. Accepting rule-based suggestions without review makes the rules' scores circular.
+3. Export: `python3 -m aegis.labels export --db data/aegis.sqlite3 --dataset live --out datasets/live-2026-10-28`. The export holds every event in range (cross-session rules need the context), labels for the labeled sessions, masked passwords, and a manifest. It contains attacker addresses, so keep it private.
+
+## Training, calibrating, and measuring ML without leakage
+
+Use three time-ordered windows over real data:
+
+```bash
+python3 -m aegis.ml train --db data/aegis.sqlite3 --dataset live --until 2026-10-18T00:00:00Z --out models/train-1018
+python3 -m aegis.ml calibrate --model models/train-1018 --labeled datasets/live-2026-10-28 \
+    --test-after 2026-10-18T00:00:00Z --objective f1 --out models/cal-1023   # objective: f1, precision:0.9, recall:0.8
+python3 -m aegis.labeled_eval datasets/live-2026-10-28 --test-after 2026-10-23T00:00:00Z --model models/cal-1023
+```
+
+To keep the measurement window untouched, give `calibrate` a labeled export that ends where the test window begins (`labels export --until 2026-10-23T00:00:00Z`). Calibration refuses sessions from the training window unless you pass `--allow-overlap`, writes a new model version (the original is never edited), records the full precision/recall curve, and warns when fewer than 20 malicious sessions make the threshold unstable.
+
 ## Getting labeled data
 
 Options, roughly from best to quickest:

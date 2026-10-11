@@ -274,3 +274,18 @@ Implemented, with tests:
 Verification: 111 tests pass. Ten deliberate mutations (no digest check, unpickling before verification, trusted manifest edits, synthetic model allowed, ML on by default, no threshold, training window ignored, no leakage warning, model change unnoticed, scoring errors escaping) each made a test fail. Both Docker images build; the default image fails closed with `dependency`, and a model trained on Python 3.14 was verified and loaded inside the ML image (Python 3.12) with a read-only filesystem, no network, and all capabilities dropped. Real data: a model trained on the first 87 honeypot sessions flagged only the session `SEQ-001` already caught and none of 59 later sessions. ML adds no value on this data yet, consistent with keeping it off.
 
 Gate changes: "ML is disabled by default until evaluation supports enabling it" → ✓. "Rule, statistical and optional ML layers can fail independently" → ✓ (each verified).
+
+---
+
+## Phase 5 progress (2026-10-11)
+
+Implemented, with tests:
+
+- Investigation UI: event filters with UTC time range and a CSV export that matches them; event dialog with provenance (mode, source, locator, parser, raw digest, chain record) and the original record with passwords masked; session view (timeline, linked findings, label form, label history, suggestion); Findings view (engine and status filters, rationale, versions, score types, limitations, facts); Sources view (checkpoint, lag, duplicates, quarantine metadata, collector state); an active-findings strip by engine.
+- Labels: migration 6 (`session_labels`, append-only `session_label_history`), validated label API, suggestions that are never auto-applied, sessions shared by sensors must be disambiguated.
+- Exports: CSV with OWASP formula-injection protection and visible escapes for control, bidirectional, and zero-width characters, bounded at 10,000 rows and labeled by dataset; labeled-dataset export with masked passwords and login messages.
+- `ml calibrate`: threshold chosen on labeled sessions after the training window (overlap refused), new verified model version, full curve, instability warnings.
+
+Verification: 120 tests pass; seven mutations (formula guard, control escaping, password masking, login-message masking, label history, calibration overlap, export redaction) each made a test fail. The browser smoke test now covers filters and CSV, provenance and the masked original, session labeling, and the Findings and Sources views.
+
+Gate change: "Event provenance and synthetic/live separation are visible and preserved in exports" → ✓ (visible in the UI as well as stored and exported).

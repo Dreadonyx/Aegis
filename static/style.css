@@ -1619,3 +1619,9 @@ dialog pre {
 .source-card .section-label, .source-card .history {
   padding:0 18px
 }
+#session-body {
+  padding:0 20px 20px
+}
+.finding-links .session-link, .finding-links .text-button, .finding-row .text-button {
+  font-size:10px
+}
