@@ -1,2 +1,4 @@
 Flask==3.1.3
 waitress==3.0.2
+# Security floor: CVE-2026-102598 (GHSA-g6x2-hccm-hh4m) is fixed in Werkzeug 3.1.9.
+werkzeug>=3.1.9

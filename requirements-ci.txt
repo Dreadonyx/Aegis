@@ -1,0 +1,2 @@
+# Tools used only in CI. Locked with hashes like the application.
+pip-audit==2.10.1

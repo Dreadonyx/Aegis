@@ -1,10 +1,12 @@
-FROM python:3.12-slim
+# Official image pinned by digest (python:3.12-slim, built 2026-10-06). Update the digest deliberately for OS patches.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 WORKDIR /app
 # The optional ML layer adds scikit-learn (about 100 MB). Build with --build-arg INSTALL_ML=true to include it.
 ARG INSTALL_ML=false
-COPY requirements.txt requirements-ml.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
-    && if [ "$INSTALL_ML" = "true" ]; then pip install --no-cache-dir -r requirements-ml.txt; fi \
+# Hash-locked installs: a substituted or tampered package fails the build.
+COPY requirements.lock requirements-ml.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && if [ "$INSTALL_ML" = "true" ]; then pip install --no-cache-dir --require-hashes -r requirements-ml.lock; fi \
     && useradd --uid 1000 --create-home aegis
 COPY app.py .
 COPY aegis ./aegis

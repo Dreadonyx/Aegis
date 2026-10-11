@@ -1,0 +1,56 @@
+# Tests, dependency audit, and image scan. Actions are pinned to commit SHAs; installs use hash-locked files.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install (hash-locked)
+        run: python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Unit, integration, and API tests
+        run: python -m pytest -q --ignore=tests/browser_smoke.py
+      - name: Detection fixtures
+        run: python -m aegis.evaluate > /dev/null
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit (hash-locked)
+        run: python -m pip install --require-hashes -r requirements-ci.lock
+      - name: Audit every lockfile
+        run: pip-audit --require-hashes --disable-pip --strict -r requirements.lock -r requirements-ml.lock -r requirements-dev.lock
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build -t aegis:ci . && docker save aegis:ci -o image.tar
+      - name: Scan (fail on fixable high or critical)
+        # The image tarball is scanned read-only; the scanner gets no Docker socket.
+        run: >-
+          docker run --rm -v "$PWD/image.tar:/scan/image.tar:ro"
+          aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          image --input /scan/image.tar --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
